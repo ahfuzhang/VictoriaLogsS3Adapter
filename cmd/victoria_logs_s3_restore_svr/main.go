@@ -5,8 +5,8 @@
 // day of the requested time range missing at <storage dir>/partitions/<YYYYMMDD>
 // is downloaded from <s3.prefix>/<YYYYMMDD>.tar and loaded into VictoriaLogs.
 //
-// S3 credentials are read from the environment variables auth.access_key_id
-// and auth.secret_access_key. All other settings come from command-line flags.
+// S3 credentials are read from the environment variables access_key_id
+// and secret_access_key. All other settings come from command-line flags.
 package main
 
 import (

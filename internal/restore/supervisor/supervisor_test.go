@@ -28,9 +28,9 @@ func TestArgs(t *testing.T) {
 }
 
 func TestFilterEnv(t *testing.T) {
-	env := []string{"PATH=/bin", "auth.access_key_id=x", "auth.secret_access_key=y", "HOME=/root", "auth.access_key_id_suffix=z"}
-	got := filterEnv(env, []string{"auth.access_key_id", "auth.secret_access_key"})
-	want := []string{"PATH=/bin", "HOME=/root", "auth.access_key_id_suffix=z"}
+	env := []string{"PATH=/bin", "access_key_id=x", "secret_access_key=y", "HOME=/root", "access_key_id_suffix=z"}
+	got := filterEnv(env, []string{"access_key_id", "secret_access_key"})
+	want := []string{"PATH=/bin", "HOME=/root", "access_key_id_suffix=z"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("unexpected env\ngot  %q\nwant %q", got, want)
 	}

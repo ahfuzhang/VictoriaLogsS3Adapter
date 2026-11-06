@@ -3,8 +3,8 @@
 // Each backup snapshots a partition via the VictoriaLogs snapshot API and
 // streams it as <s3.prefix>/<YYYYMMDD>.tar into an S3 bucket.
 //
-// S3 credentials are read from the environment variables auth.access_key_id
-// and auth.secret_access_key. All other settings come from command-line flags.
+// S3 credentials are read from the environment variables access_key_id
+// and secret_access_key. All other settings come from command-line flags.
 package main
 
 import (

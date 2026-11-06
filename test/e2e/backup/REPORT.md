@@ -169,7 +169,7 @@ sha256=7d5141b08df16e19946381e2b00ada64a531162b9c3c58d81f9cf14fe464928e
 
 | 场景 | exit | 错误信息（节选） | 残留对象 | 遗留快照 | 结果 |
 |---|---|---|---|---|---|
-| 缺少 S3 凭证环境变量 | 1 | `environment variables "auth.access_key_id" and "auth.secret_access_key" must be set` | 无 | 0 | 通过 |
+| 缺少 S3 凭证环境变量 | 1 | `environment variables "access_key_id" and "secret_access_key" must be set` | 无 | 0 | 通过 |
 | secret key 错误 | 1 | `cannot access S3 bucket "vl-backup-e2e": Access Denied.` | 无 | 0 | 通过 |
 | 桶不存在 | 1 | `S3 bucket "no-such-bucket-e2e" does not exist` | 无 | 0 | 通过 |
 | 前缀引用的环境变量未设置 | 1 | `environment variable "namespace" referenced by template ... is not set or empty` | 无 | 0 | 通过 |

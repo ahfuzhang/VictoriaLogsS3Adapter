@@ -1,52 +1,52 @@
 # victoria_logs_s3_backup
 
-把 VictoriaLogs 某一天（UTC）的分区做成快照，以 tar 流的形式上传到 S3 对象 `<s3.prefix>/<YYYYMMDD>.tar`。
+Takes a snapshot of a VictoriaLogs partition for one day (UTC) and uploads it as a tar stream to the S3 object `<s3.prefix>/<YYYYMMDD>.tar`.
 
-有两种运行模式，必须且只能选一种：
+There are two run modes; exactly one must be chosen:
 
-* **一次性备份**（`-backup.date=YYYYMMDD`）：备份指定日期的分区后退出。
-* **定时备份**（`-backup.yesterday.at=HHMM`）：常驻运行，每天在指定的 UTC 时刻备份前一个 UTC 日的分区。
+* **One-time backup** (`-backup.date=YYYYMMDD`): back up the partition for the specified date, then exit.
+* **Scheduled backup** (`-backup.yesterday.at=HHMM`): run as a daemon and, at the specified UTC time each day, back up the previous UTC day's partition.
 
-> 工具直接读取 VictoriaLogs 数据目录下的快照文件，所以必须和 VictoriaLogs 运行在同一台机器上（或挂载同一个数据目录）。
+> The tool reads the snapshot files in VictoriaLogs' data directory directly, so it must run on the same machine as VictoriaLogs (or mount the same data directory).
 
-## 命令行参数
+## Command-line flags
 
-| 参数 | 默认值 | 说明 |
+| Flag | Default | Description |
 |---|---|---|
-| `-s3.endpoint` | | **必填**。S3 endpoint，例如 `https://oss-cn-hongkong.aliyuncs.com`。 |
-| `-s3.region` | | S3 region，例如 `cn-hongkong`。 |
-| `-s3.bucket` | | **必填**。S3 bucket 名。 |
-| `-s3.prefix` | | 对象 key 的前缀模板，支持 `{环境变量}` 和 `${时间格式}` 占位符，详见 [-s3.prefix 前缀模板](s3_prefix.md)。 |
-| `-victoria.logs.addr` | | **必填**。VictoriaLogs 的 HTTP 地址，例如 `http://127.0.0.1:9428`。启动时会访问 `/health` 检查是否可达。 |
-| `-victoria.logs.auth.key` | | 访问 `/internal/partition/*` 等接口时使用的 auth key，即 VictoriaLogs 的 `-partitionManageAuthKey`。VictoriaLogs 未设置时留空。 |
-| `-victoria.logs.storage.dir` | | **必填**。VictoriaLogs 的 `-storageDataPath` 在本机上的路径。启动时检查目录是否存在。 |
-| `-backup.date` | | 一次性备份这一天（UTC）的分区，格式 `YYYYMMDD`，完成后退出。与 `-backup.yesterday.at` 互斥。 |
-| `-backup.yesterday.at` | | 常驻运行，每天在这个 UTC 时刻备份前一个 UTC 日的分区，格式 `HHMM`（24 小时制），例如 `0015`。与 `-backup.date` 互斥。 |
-| `-max.upload.bytes.per.second` | `100mb` | 上传限速。单位 `b`、`kb`、`mb`、`gb`，不区分大小写，按 1024 进位；不带单位按字节计；可以写小数，例如 `1.5mb`。必须大于 0。 |
-| `-loglevel` | `info` | 日志级别：`debug`、`info`、`warn`、`error`。 |
+| `-s3.endpoint` | | **Required**. S3 endpoint, e.g. `https://oss-cn-hongkong.aliyuncs.com`. |
+| `-s3.region` | | S3 region, e.g. `cn-hongkong`. |
+| `-s3.bucket` | | **Required**. S3 bucket name. |
+| `-s3.prefix` | | Object key prefix template; supports `{ENV_VAR}` and `${time format}` placeholders. See [-s3.prefix prefix template](s3_prefix.md). |
+| `-victoria.logs.addr` | | **Required**. HTTP address of VictoriaLogs, e.g. `http://127.0.0.1:9428`. `/health` is requested at startup to check reachability. |
+| `-victoria.logs.auth.key` | | Auth key used when calling endpoints such as `/internal/partition/*`, i.e. VictoriaLogs' `-partitionManageAuthKey`. Leave empty if VictoriaLogs doesn't set it. |
+| `-victoria.logs.storage.dir` | | **Required**. Local path of VictoriaLogs' `-storageDataPath`. The directory's existence is checked at startup. |
+| `-backup.date` | | Back up the partition for this day (UTC) once, format `YYYYMMDD`, then exit. Mutually exclusive with `-backup.yesterday.at`. |
+| `-backup.yesterday.at` | | Run as a daemon and, at this UTC time each day, back up the previous UTC day's partition. Format `HHMM` (24-hour clock), e.g. `0015`. Mutually exclusive with `-backup.date`. |
+| `-max.upload.bytes.per.second` | `100mb` | Upload rate limit. Units `b`, `kb`, `mb`, `gb`, case-insensitive, powers of 1024; no unit means bytes; decimals are allowed, e.g. `1.5mb`. Must be greater than 0. |
+| `-loglevel` | `info` | Log level: `debug`, `info`, `warn`, `error`. |
 
-运行 `victoria_logs_s3_backup -h` 可查看同样的参数说明。
+Run `victoria_logs_s3_backup -h` to see the same flag descriptions.
 
-## 环境变量
+## Environment variables
 
-| 环境变量 | 说明 |
+| Environment variable | Description |
 |---|---|
-| `auth.access_key_id` | **必填**。S3 的 access key id。 |
-| `auth.secret_access_key` | **必填**。S3 的 secret access key。 |
-| `-s3.prefix` 中引用的 `{VAR}` | 例如 `{namespace}`、`{env}`；未设置或为空时启动报错。 |
+| `access_key_id` | **Required**. S3 access key id. |
+| `secret_access_key` | **Required**. S3 secret access key. |
+| `{VAR}` referenced in `-s3.prefix` | e.g. `{namespace}`, `{env}`; startup fails if unset or empty. |
 
-变量名里带点号，shell 的 `export` 无法设置，请用 `env` 传入：
+You can pass them with `env`:
 
 ```bash
-env 'auth.access_key_id=xxx' 'auth.secret_access_key=yyy' victoria_logs_s3_backup ...
+env 'access_key_id=xxx' 'secret_access_key=yyy' victoria_logs_s3_backup ...
 ```
 
-## 示例
+## Examples
 
-一次性备份 `20261104` 分区：
+One-time backup of the `20261104` partition:
 
 ```bash
-env 'auth.access_key_id=xxx' 'auth.secret_access_key=yyy' namespace=ns1 env=prod \
+env 'access_key_id=xxx' 'secret_access_key=yyy' namespace=ns1 env=prod \
   victoria_logs_s3_backup \
   -s3.endpoint=https://oss-cn-hongkong.aliyuncs.com \
   -s3.region=cn-hongkong \
@@ -55,13 +55,13 @@ env 'auth.access_key_id=xxx' 'auth.secret_access_key=yyy' namespace=ns1 env=prod
   -victoria.logs.addr=http://127.0.0.1:9428 \
   -victoria.logs.storage.dir=/data/victoria-logs \
   -backup.date=20261104
-# 上传到 s3://my-bucket/victoria_logs/ns1/prod/20261104.tar
+# uploads to s3://my-bucket/victoria_logs/ns1/prod/20261104.tar
 ```
 
-每天 00:15（UTC）备份前一天的分区，限速 50 MiB/s，常驻运行：
+Back up the previous day's partition every day at 00:15 (UTC), rate-limited to 50 MiB/s, running as a daemon:
 
 ```bash
-env 'auth.access_key_id=xxx' 'auth.secret_access_key=yyy' namespace=ns1 env=prod \
+env 'access_key_id=xxx' 'secret_access_key=yyy' namespace=ns1 env=prod \
   victoria_logs_s3_backup \
   -s3.endpoint=https://oss-cn-hongkong.aliyuncs.com \
   -s3.region=cn-hongkong \
@@ -73,55 +73,55 @@ env 'auth.access_key_id=xxx' 'auth.secret_access_key=yyy' namespace=ns1 env=prod
   -max.upload.bytes.per.second=50mb
 ```
 
-## 备份流程
+## Backup flow
 
-1. 检查参数；检查 S3 bucket 能否访问、VictoriaLogs 能否访问、`-victoria.logs.storage.dir` 是否存在。任何一项失败都直接退出。
-2. 检查 `<storage.dir>/partitions/<YYYYMMDD>` 是否存在。不存在说明这一天没有数据，或者 `-victoria.logs.storage.dir` 配错了。
-3. 调用 `/internal/force_flush`，让刚写入的日志落盘（失败只记警告）。
-4. 调用 `/internal/partition/snapshot/create?partition_prefix=<YYYYMMDD>` 创建快照，前后各调用一次 `/internal/partition/snapshot/list`，找出新建的快照。
-5. 把 VictoriaLogs 返回的快照路径中从 `partitions/` 开始的部分拼到 `-victoria.logs.storage.dir` 后面，得到本地快照目录。因此 VictoriaLogs 跑在容器里、挂载点和本机路径不同也没关系。
-6. 把快照目录打成 tar 流，经过限速后以 multipart 方式上传到 `<展开后的 s3.prefix>/<YYYYMMDD>.tar`。全程流式处理，不在本地落盘。
-7. 上传完成后检查 S3 对象的大小与 tar 流大小一致。
-8. 删除快照。无论备份成功还是失败都会删除；VictoriaLogs 版本较旧、没有删除接口时，直接删除本地快照目录。
+1. Validate flags; check that the S3 bucket is accessible, VictoriaLogs is reachable, and `-victoria.logs.storage.dir` exists. If any check fails, exit immediately.
+2. Check that `<storage.dir>/partitions/<YYYYMMDD>` exists. If not, there is no data for that day, or `-victoria.logs.storage.dir` is misconfigured.
+3. Call `/internal/force_flush` so that recently written logs are flushed to disk (a failure only logs a warning).
+4. Call `/internal/partition/snapshot/create?partition_prefix=<YYYYMMDD>` to create a snapshot, calling `/internal/partition/snapshot/list` once before and once after to find the newly created snapshot.
+5. Append the part of the snapshot path returned by VictoriaLogs that starts at `partitions/` to `-victoria.logs.storage.dir` to get the local snapshot directory. So it works even if VictoriaLogs runs in a container with a mount point different from the local path.
+6. Pack the snapshot directory into a tar stream, rate-limit it, and upload it via multipart to `<expanded s3.prefix>/<YYYYMMDD>.tar`. Everything is streamed; nothing is written to local disk.
+7. After the upload completes, verify that the S3 object's size equals the tar stream's size.
+8. Delete the snapshot. This happens whether the backup succeeded or failed; for older VictoriaLogs versions without a delete endpoint, the local snapshot directory is deleted directly.
 
-上传过程中每 30 秒输出一次进度日志。
+Progress is logged every 30 seconds during the upload.
 
-### tar 文件格式
+### tar file format
 
-tar 不压缩，内容与在 `partitions/<YYYYMMDD>/snapshots/` 目录下执行 `tar -cf <YYYYMMDD>.tar ./<快照名>` 相同，即 `<快照名>/indexdb/...` 和 `<快照名>/datadb/...`。每个 tar 都是自包含的单日分区，不依赖本项目也能手工恢复，把快照目录解包成 VictoriaLogs 数据目录下的 `partitions/<YYYYMMDD>` 即可：
+The tar is uncompressed, and its content is the same as running `tar -cf <YYYYMMDD>.tar ./<snapshot name>` in the `partitions/<YYYYMMDD>/snapshots/` directory, i.e. `<snapshot name>/indexdb/...` and `<snapshot name>/datadb/...`. Each tar is a self-contained single-day partition that can be restored by hand without this project: extract the snapshot directory as `partitions/<YYYYMMDD>` under VictoriaLogs' data directory:
 
 ```bash
 mkdir -p /data/victoria-logs/partitions/20261104
 tar -xf 20261104.tar -C /data/victoria-logs/partitions/20261104 --strip-components=1
-# 然后重启 VictoriaLogs，或调用 /internal/partition/attach?name=20261104 热加载
+# then restart VictoriaLogs, or call /internal/partition/attach?name=20261104 to hot-load it
 ```
 
-符号链接、设备文件等非普通文件会被跳过，并输出警告日志。
+Non-regular files such as symlinks and device files are skipped, with a warning logged.
 
-单个对象的 multipart 分片大小为 64 MiB，最多 10000 片，所以单个分区的 tar 最大 640 GiB。S3 对象只有在全部上传成功后才可见，中途失败不会留下半个对象。
+Each object's multipart part size is 64 MiB with at most 10000 parts, so a single partition's tar can be at most 640 GiB. An S3 object only becomes visible after all parts are uploaded successfully, so a mid-way failure never leaves a partial object.
 
-### 备份当天的分区
+### Backing up the current day's partition
 
-`-backup.date` 指定今天或未来的日期时，工具会输出警告：这个分区可能还在写入，备份只包含已经写入的日志。
+When `-backup.date` specifies today's or a future date, the tool prints a warning: the partition may still be written to, and the backup only contains logs already written.
 
-## 定时模式
+## Scheduled mode
 
-* 时间一律按 UTC 计算：每天到达 `-backup.yesterday.at` 指定的 UTC 时刻时，备份前一个 UTC 日的分区（VictoriaLogs 的分区本身就是按 UTC 日划分的）。
-* 一次备份失败时会重试，最多尝试 3 次，间隔分别为 1 分钟、2 分钟。分区目录不存在时不重试。
-* 3 次都失败时记录错误日志，进程不退出，等第二天的定时继续。
-* 等待期间每分钟检查一次系统时间，系统休眠或时钟调整后不会错过备份。
+* All times are computed in UTC: when the UTC time given by `-backup.yesterday.at` is reached each day, the previous UTC day's partition is backed up (VictoriaLogs partitions are themselves split by UTC day).
+* A failed backup is retried, up to 3 attempts in total, with intervals of 1 minute and 2 minutes. If the partition directory doesn't exist, no retry is made.
+* If all 3 attempts fail, an error is logged; the process does not exit and continues with the next day's schedule.
+* While waiting, the system time is checked every minute, so a backup isn't missed after system sleep or a clock adjustment.
 
-## 退出与信号
+## Exit and signals
 
-* 收到 `SIGINT` / `SIGTERM` 时中断正在进行的备份（会删除快照，不会留下半个 S3 对象）并退出；再发一次信号会立即终止进程。
-* 退出码：
+* On `SIGINT` / `SIGTERM`, the backup in progress is interrupted (the snapshot is deleted and no partial S3 object is left) and the process exits; sending the signal again terminates the process immediately.
+* Exit codes:
 
-| 退出码 | 含义 |
+| Exit code | Meaning |
 |---|---|
-| `0` | 一次性备份成功；或定时模式收到信号正常退出。 |
-| `1` | 参数检查不通过、S3 / VictoriaLogs 无法访问、一次性备份失败或被信号中断。 |
-| `2` | 命令行参数无法解析、带有多余的位置参数、`-loglevel` 无效。 |
+| `0` | One-time backup succeeded; or scheduled mode exited normally on a signal. |
+| `1` | Flag validation failed, S3 / VictoriaLogs unreachable, one-time backup failed or was interrupted by a signal. |
+| `2` | Command-line flags could not be parsed, extra positional arguments were given, or `-loglevel` is invalid. |
 
-## 日志
+## Logs
 
-日志为 JSON 格式，输出到 stderr。一次备份成功后会输出一条 `backup completed`，包含对象 key、文件数、tar 大小、耗时、平均速度等信息。
+Logs are in JSON format, written to stderr. After a successful backup, one `backup completed` entry is logged, containing the object key, file count, tar size, duration, average speed, etc.

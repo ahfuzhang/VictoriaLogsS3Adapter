@@ -2,3 +2,6 @@
 /build/
 /.e2e/
 /prompts/
+.env
+/test/k8s/
+/test/experiments/

@@ -82,7 +82,7 @@ for c in root.findall(p + "Contents", ns):
 # To run it in the background, use: backup_argv ...; "${BACKUP_CMD[@]}" & pid=$!
 # ($! is then the PID of the backup tool itself, since env execs it.)
 backup_argv() {
-  BACKUP_CMD=(env "auth.access_key_id=${S3_ACCESS_KEY}" "auth.secret_access_key=${S3_SECRET_KEY}"
+  BACKUP_CMD=(env "access_key_id=${S3_ACCESS_KEY}" "secret_access_key=${S3_SECRET_KEY}"
     "$BACKUP_BIN"
     -s3.endpoint="$S3_ENDPOINT"
     -s3.region="$S3_REGION"

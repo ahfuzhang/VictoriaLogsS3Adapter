@@ -27,8 +27,8 @@ import (
 
 // Environment variables holding S3 credentials.
 const (
-	EnvAccessKeyID     = "auth.access_key_id"
-	EnvSecretAccessKey = "auth.secret_access_key"
+	EnvAccessKeyID     = "access_key_id"
+	EnvSecretAccessKey = "secret_access_key"
 )
 
 // DefaultPartSize is the multipart part size used for streaming uploads.

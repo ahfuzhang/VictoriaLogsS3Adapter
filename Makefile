@@ -34,7 +34,7 @@ $(PLATFORMS):
 
 ## docker: build Docker image $(IMAGE):$(TAG); binaries are compiled inside the image
 ##         (e.g. make docker TAG=v1.0.0 DOCKER_BUILD_FLAGS='--platform linux/amd64')
-# make docker DOCKER_BUILD_FLAGS='--platform linux/amd64'
+# make docker DOCKER_BUILD_FLAGS='--platform linux/amd64' IMAGE=ahfuzhang/victoria-logs-s3-adapter TAG=v0.1.0
 docker:
 	$(DOCKER) build $(DOCKER_BUILD_FLAGS) -t $(IMAGE):$(TAG) .
 

@@ -249,19 +249,19 @@ func TestBackupSuccess(t *testing.T) {
 	var names []string
 	for _, en := range entries {
 		names = append(names, en.name)
-		if en.name == "20261105094918-0000000000000001/datadb/P1/big.bin" && en.content != strings.Repeat("x", 100_000) {
+		if en.name == "20261104/datadb/P1/big.bin" && en.content != strings.Repeat("x", 100_000) {
 			t.Fatalf("big.bin content mismatch")
 		}
 	}
 	want := []string{
-		"20261105094918-0000000000000001/",
-		"20261105094918-0000000000000001/datadb/",
-		"20261105094918-0000000000000001/datadb/P1/",
-		"20261105094918-0000000000000001/datadb/P1/big.bin",
-		"20261105094918-0000000000000001/datadb/P1/metadata.json",
-		"20261105094918-0000000000000001/datadb/parts.json",
-		"20261105094918-0000000000000001/indexdb/",
-		"20261105094918-0000000000000001/indexdb/parts.json",
+		"20261104/",
+		"20261104/datadb/",
+		"20261104/datadb/P1/",
+		"20261104/datadb/P1/big.bin",
+		"20261104/datadb/P1/metadata.json",
+		"20261104/datadb/parts.json",
+		"20261104/indexdb/",
+		"20261104/indexdb/parts.json",
 	}
 	if strings.Join(names, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("tar entries:\n%s\nwant:\n%s", strings.Join(names, "\n"), strings.Join(want, "\n"))

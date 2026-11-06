@@ -9,7 +9,7 @@ import (
 func TestExpand(t *testing.T) {
 	t.Setenv("namespace", "ns1")
 	t.Setenv("env", "prod")
-	t.Setenv("auth.access_key_id", "dotted")
+	t.Setenv("access_key_id", "dotted")
 	now := time.Date(2026, 11, 4, 9, 10, 28, 0, time.FixedZone("UTC+8", 8*3600))
 
 	cases := []struct {
@@ -30,7 +30,7 @@ func TestExpand(t *testing.T) {
 		{"{env}/${YYYY}/${MM}/${DD}/b", "prod/2026/11/04/b", true, "prod/"},
 		{"${HH}h${MI}m", "01h10m", true, ""},
 		{"a/${YYYY--MM__DD..HH}", "a/2026--11__04..01", true, "a/"},
-		{"{auth.access_key_id}", "dotted", false, "dotted/"},
+		{"{access_key_id}", "dotted", false, "dotted/"},
 		{"", "", false, ""},
 		{"plain", "plain", false, "plain/"},
 	}

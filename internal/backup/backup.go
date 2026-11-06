@@ -137,7 +137,7 @@ func (b *Backuper) Backup(ctx context.Context, date string) (*Result, error) {
 	log = log.With("snapshot", snapshot)
 	log.Info("snapshot created")
 
-	localDir, name, mapErr := localSnapshotDir(b.StorageDir, snapshot, date)
+	localDir, _, mapErr := localSnapshotDir(b.StorageDir, snapshot, date)
 	defer b.deleteSnapshot(ctx, log, snapshot, localDir)
 	if mapErr != nil {
 		return nil, mapErr
@@ -152,7 +152,7 @@ func (b *Backuper) Backup(ctx context.Context, date string) (*Result, error) {
 	log.Info("uploading snapshot", "local_dir", localDir, "bucket", b.Bucket, "max_upload_bytes_per_second", b.BytesPerSecond)
 
 	uploadStart := b.timeNow()
-	st, tarBytes, err := b.upload(ctx, log, key, localDir, name)
+	st, tarBytes, err := b.upload(ctx, log, key, localDir, date)
 	if err != nil {
 		if ctx.Err() != nil {
 			log.Debug("upload interrupted", "error", err)

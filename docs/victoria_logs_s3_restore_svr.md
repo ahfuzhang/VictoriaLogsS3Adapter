@@ -1,72 +1,72 @@
 # victoria_logs_s3_restore_svr
 
-挡在 VictoriaLogs 前面的 HTTP/1.1 代理。所有请求都会转发给 VictoriaLogs；对于带时间范围的查询请求，如果范围内某一天的分区本地不存在，就先从 S3 下载 [victoria_logs_s3_backup](victoria_logs_s3_backup.md) 生成的 `<s3.prefix>/<YYYYMMDD>.tar`，解包并加载到 VictoriaLogs，再转发请求。对客户端来说，它就是一个能查到历史数据的 VictoriaLogs。
+An HTTP/1.1 proxy placed in front of VictoriaLogs. All requests are forwarded to VictoriaLogs; for queries with a time range, if the partition for a day in the range doesn't exist locally, it first downloads the `<s3.prefix>/<YYYYMMDD>.tar` produced by [victoria_logs_s3_backup](victoria_logs_s3_backup.md) from S3, extracts it and loads it into VictoriaLogs, and then forwards the request. To clients, it looks like a VictoriaLogs that can query historical data.
 
-## 两种运行模式
+## Two run modes
 
-必须且只能选一种：
+Exactly one must be chosen:
 
-| 模式 | 参数 | 说明 |
+| Mode | Flag | Description |
 |---|---|---|
-| 托管模式 | `-victoria.logs.bin` | 由本服务启动并管理一个 VictoriaLogs 子进程。**推荐**，适合专门用来查询历史日志的实例。 |
-| 外部模式 | `-victoria.logs.addr` | 代理到一个已经在运行的 VictoriaLogs。本服务必须能直接写入它的数据目录。 |
+| Managed mode | `-victoria.logs.bin` | This service starts and manages a VictoriaLogs child process. **Recommended**, suitable for instances dedicated to querying historical logs. |
+| External mode | `-victoria.logs.addr` | Proxies to an already-running VictoriaLogs. This service must be able to write directly to its data directory. |
 
-### 托管模式
+### Managed mode
 
-* 子进程监听 `127.0.0.1` 上的一个空闲端口，只有本服务访问它；客户端只访问 `-addr`。
-* 子进程的启动参数为 `-storageDataPath=<-victoria.logs.storage.dir> -httpListenAddr=127.0.0.1:<端口> -retentionPeriod=100y -loggerFormat=json`，设置了 `-victoria.logs.auth.key` 时再加上 `-partitionManageAuthKey`。`100y` 是 VictoriaLogs 允许的最大保留期，恢复的分区不会因为过期被删除。
-* S3 凭证的环境变量不会传给子进程。
-* 子进程意外退出时自动重启（退避间隔从 1 秒逐步增加到 30 秒）。
-* 恢复的分区优先通过 `/internal/partition/attach` 热加载；热加载失败时重启子进程，让它在启动时打开所有分区。重启期间新的请求会等待（最长 5 分钟，超时返回 503），已在处理中的请求有 30 秒时间完成。
+* The child process listens on a free port on `127.0.0.1`, accessed only by this service; clients only access `-addr`.
+* The child process is started with `-storageDataPath=<-victoria.logs.storage.dir> -httpListenAddr=127.0.0.1:<port> -retentionPeriod=100y -loggerFormat=json`, plus `-partitionManageAuthKey` when `-victoria.logs.auth.key` is set. `100y` is the maximum retention period VictoriaLogs allows, so restored partitions are not deleted for expiring.
+* The S3 credential environment variables are not passed to the child process.
+* If the child process exits unexpectedly it is restarted automatically (backoff grows from 1 second up to 30 seconds).
+* Restored partitions are preferably hot-loaded via `/internal/partition/attach`; if hot-loading fails, the child process is restarted so it opens all partitions at startup. During the restart, new requests wait (up to 5 minutes, then 503 on timeout), and in-flight requests have 30 seconds to complete.
 
-### 外部模式
+### External mode
 
-* 启动时访问 `-victoria.logs.addr` 检查 VictoriaLogs 是否可达。
-* `-victoria.logs.storage.dir` 必须是这个 VictoriaLogs 的 `-storageDataPath`，并且本服务要能读写它。目录下没有 `flock.lock` 时会输出警告：恢复的分区可能对 VictoriaLogs 不可见。
-* 恢复的分区只能通过 `/internal/partition/attach` 热加载，不会重启 VictoriaLogs。加载失败时分区目录保留，下次请求这一天时重试。
-* 启动时以及之后每 10 分钟，从 VictoriaLogs 的 `/metrics` 读取 `-retentionPeriod`。早于保留期的日期不会被恢复，因为 VictoriaLogs 会立即删除它们。`-retention.maxDiskSpaceUsageBytes`、`-retention.maxDiskUsagePercent` 也可能删除恢复的分区。
-* 启动时会对比本地 `partitions/` 下的目录与 VictoriaLogs 已加载的分区列表，未加载的分区在被请求时再加载。
+* At startup, `-victoria.logs.addr` is contacted to check that VictoriaLogs is reachable.
+* `-victoria.logs.storage.dir` must be this VictoriaLogs' `-storageDataPath`, and this service must be able to read and write it. If there is no `flock.lock` in the directory, a warning is logged: restored partitions may be invisible to VictoriaLogs.
+* Restored partitions can only be hot-loaded via `/internal/partition/attach`; VictoriaLogs is not restarted. If loading fails, the partition directory is kept and retried the next time that day is requested.
+* At startup and every 10 minutes after, `-retentionPeriod` is read from VictoriaLogs' `/metrics`. Dates older than the retention period are not restored, because VictoriaLogs would delete them immediately. `-retention.maxDiskSpaceUsageBytes` and `-retention.maxDiskUsagePercent` may also delete restored partitions.
+* At startup, the directories under local `partitions/` are compared with the list of partitions VictoriaLogs has loaded; partitions not yet loaded are loaded when requested.
 
-## 命令行参数
+## Command-line flags
 
-| 参数 | 默认值 | 说明 |
+| Flag | Default | Description |
 |---|---|---|
-| `-s3.endpoint` | | **必填**。S3 endpoint，例如 `https://oss-cn-hongkong.aliyuncs.com`。 |
-| `-s3.region` | | S3 region，例如 `cn-hongkong`。 |
-| `-s3.bucket` | | **必填**。S3 bucket 名。 |
-| `-s3.prefix` | | 对象 key 的前缀模板，**必须与备份时使用的完全相同**，详见 [-s3.prefix 前缀模板](s3_prefix.md)。 |
-| `-victoria.logs.bin` | | VictoriaLogs 可执行文件的路径（可以只写文件名，从 `PATH` 中查找）。设置后进入托管模式。与 `-victoria.logs.addr` 互斥。 |
-| `-victoria.logs.addr` | | 已运行的 VictoriaLogs 的地址，例如 `http://127.0.0.1:9428`。设置后进入外部模式。与 `-victoria.logs.bin` 互斥。 |
-| `-victoria.logs.storage.dir` | `/tmp/` | VictoriaLogs 的数据目录（`-storageDataPath`），不存在时自动创建。恢复的分区放在 `<dir>/partitions/<YYYYMMDD>`。 |
-| `-victoria.logs.auth.key` | | VictoriaLogs 的 `-partitionManageAuthKey`，访问 `/internal/partition/*` 接口时使用；托管模式下也会传给子进程。 |
-| `-max.download.bytes.per.second` | `100mb` | 每个备份的下载限速。单位 `b`、`kb`、`mb`、`gb`，不区分大小写，按 1024 进位。最多同时下载 2 个备份，所以总带宽最多为该值的 2 倍。 |
-| `-addr` | `0.0.0.0:8093` | HTTP 监听地址。 |
-| `-http.prefix` | | 服务挂载的路径前缀，例如 `/admin/`。前缀之外的路径返回 404；转发给 VictoriaLogs 之前会去掉前缀。`/admin`、`/admin/`、`admin/` 是等价的写法。 |
-| `-restore.max.days` | `31` | 单个请求最多恢复多少天。时间范围更长时只恢复最近的这么多天。最小为 1。 |
-| `-loglevel` | `info` | 日志级别：`debug`、`info`、`warn`、`error`。 |
+| `-s3.endpoint` | | **Required**. S3 endpoint, e.g. `https://oss-cn-hongkong.aliyuncs.com`. |
+| `-s3.region` | | S3 region, e.g. `cn-hongkong`. |
+| `-s3.bucket` | | **Required**. S3 bucket name. |
+| `-s3.prefix` | | Object key prefix template; **must be exactly the same as used for backup**. See [-s3.prefix prefix template](s3_prefix.md). |
+| `-victoria.logs.bin` | | Path of the VictoriaLogs executable (a bare file name is looked up in `PATH`). Setting it enables managed mode. Mutually exclusive with `-victoria.logs.addr`. |
+| `-victoria.logs.addr` | | Address of a running VictoriaLogs, e.g. `http://127.0.0.1:9428`. Setting it enables external mode. Mutually exclusive with `-victoria.logs.bin`. |
+| `-victoria.logs.storage.dir` | `/tmp/` | VictoriaLogs' data directory (`-storageDataPath`); created automatically if it doesn't exist. Restored partitions are placed at `<dir>/partitions/<YYYYMMDD>`. |
+| `-victoria.logs.auth.key` | | VictoriaLogs' `-partitionManageAuthKey`, used when calling `/internal/partition/*` endpoints; in managed mode it is also passed to the child process. |
+| `-max.download.bytes.per.second` | `100mb` | Download rate limit per backup. Units `b`, `kb`, `mb`, `gb`, case-insensitive, powers of 1024. At most 2 backups are downloaded concurrently, so total bandwidth is at most twice this value. |
+| `-addr` | `0.0.0.0:8093` | HTTP listen address. |
+| `-http.prefix` | | Path prefix the service is mounted under, e.g. `/admin/`. Paths outside the prefix return 404; the prefix is stripped before forwarding to VictoriaLogs. `/admin`, `/admin/` and `admin/` are equivalent. |
+| `-restore.max.days` | `31` | Maximum number of days restored per request. For a longer time range, only the most recent this-many days are restored. Minimum 1. |
+| `-loglevel` | `info` | Log level: `debug`, `info`, `warn`, `error`. |
 
-运行 `victoria_logs_s3_restore_svr -h` 可查看同样的参数说明。
+Run `victoria_logs_s3_restore_svr -h` to see the same flag descriptions.
 
-## 环境变量
+## Environment variables
 
-| 环境变量 | 说明 |
+| Environment variable | Description |
 |---|---|
-| `auth.access_key_id` | **必填**。S3 的 access key id。 |
-| `auth.secret_access_key` | **必填**。S3 的 secret access key。 |
-| `-s3.prefix` 中引用的 `{VAR}` | 例如 `{namespace}`、`{env}`；未设置或为空时启动报错。 |
+| `access_key_id` | **Required**. S3 access key id. |
+| `secret_access_key` | **Required**. S3 secret access key. |
+| `{VAR}` referenced in `-s3.prefix` | e.g. `{namespace}`, `{env}`; startup fails if unset or empty. |
 
-变量名里带点号，shell 的 `export` 无法设置，请用 `env` 传入：
+You can pass them with `env`:
 
 ```bash
-env 'auth.access_key_id=xxx' 'auth.secret_access_key=yyy' victoria_logs_s3_restore_svr ...
+env 'access_key_id=xxx' 'secret_access_key=yyy' victoria_logs_s3_restore_svr ...
 ```
 
-## 示例
+## Examples
 
-托管模式，服务挂在 `/admin/` 下：
+Managed mode, with the service mounted under `/admin/`:
 
 ```bash
-env 'auth.access_key_id=xxx' 'auth.secret_access_key=yyy' namespace=ns1 env=prod \
+env 'access_key_id=xxx' 'secret_access_key=yyy' namespace=ns1 env=prod \
   victoria_logs_s3_restore_svr \
   -s3.endpoint=https://oss-cn-hongkong.aliyuncs.com \
   -s3.region=cn-hongkong \
@@ -78,7 +78,7 @@ env 'auth.access_key_id=xxx' 'auth.secret_access_key=yyy' namespace=ns1 env=prod
   -http.prefix=/admin/
 ```
 
-查询 2026-11-04 全天的日志。如果本地还没有这一天的分区，请求会等到从 S3 恢复完成后再返回结果：
+Query all logs for 2026-11-04. If the partition for that day isn't available locally, the request waits until the restore from S3 completes before returning results:
 
 ```bash
 curl http://127.0.0.1:8093/admin/select/logsql/query \
@@ -87,10 +87,10 @@ curl http://127.0.0.1:8093/admin/select/logsql/query \
   -d 'end=2026-11-05T00:00:00Z'
 ```
 
-外部模式，代理到本机已运行的 VictoriaLogs：
+External mode, proxying to a VictoriaLogs already running on this machine:
 
 ```bash
-env 'auth.access_key_id=xxx' 'auth.secret_access_key=yyy' namespace=ns1 env=prod \
+env 'access_key_id=xxx' 'secret_access_key=yyy' namespace=ns1 env=prod \
   victoria_logs_s3_restore_svr \
   -s3.endpoint=https://oss-cn-hongkong.aliyuncs.com \
   -s3.bucket=my-bucket \
@@ -99,49 +99,49 @@ env 'auth.access_key_id=xxx' 'auth.secret_access_key=yyy' namespace=ns1 env=prod
   -victoria.logs.storage.dir=/data/victoria-logs
 ```
 
-## 哪些请求会触发恢复
+## Which requests trigger a restore
 
-去掉 `-http.prefix` 后，路径以 `/select/logsql/` 开头（例如 `query`、`hits`、`field_names`、`stream_field_names` 等），并且带有 `start` 或 `end` 参数的请求。参数可以在 URL 查询串中，也可以在 `application/x-www-form-urlencoded` 的请求体中（请求体优先），与 VictoriaLogs 的取值方式相同。其他请求直接转发。
+After removing `-http.prefix`, requests whose path starts with `/select/logsql/` (e.g. `query`, `hits`, `field_names`, `stream_field_names`, etc.) and that carry a `start` or `end` parameter. The parameters can be in the URL query string or in an `application/x-www-form-urlencoded` request body (the body takes precedence), the same way VictoriaLogs reads them. All other requests are forwarded directly.
 
-时间范围的计算与 VictoriaLogs 一致：
+The time range is computed the same way as in VictoriaLogs:
 
-* `start`、`end` 支持的格式：`now`；相对时间如 `5m`、`1h30m`、`now-1h`；秒 / 毫秒 / 微秒 / 纳秒级 Unix 时间戳；`YYYY`、`YYYY-MM`、`YYYY-MM-DD`、`YYYY-MM-DDTHH`、`YYYY-MM-DDTHH:MM`、`YYYY-MM-DDTHH:MM:SS`（可带 `Z` 或 `±HH:MM`）；RFC3339。
-* 不带时区的时间按本服务所在机器的本地时区解释（与 VictoriaLogs 的行为相同）。
-* 范围是 `[start, end)`，`end` 不包含在内。只有 `start` 时，`end` 取当前时间；只有 `end` 时，只恢复 `end` 所在的那一天。
-* 按 UTC 日换算成分区名 `YYYYMMDD`；晚于今天（UTC）的日期忽略。
-* 覆盖的天数超过 `-restore.max.days` 时，只恢复最近的 `-restore.max.days` 天，并输出警告日志。
-* 参数无法解析时不恢复，直接转发，由 VictoriaLogs 向客户端报错。
+* Supported formats for `start` and `end`: `now`; relative times such as `5m`, `1h30m`, `now-1h`; Unix timestamps in seconds / milliseconds / microseconds / nanoseconds; `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, `YYYY-MM-DDTHH`, `YYYY-MM-DDTHH:MM`, `YYYY-MM-DDTHH:MM:SS` (optionally with `Z` or `±HH:MM`); RFC3339.
+* Times without a time zone are interpreted in the local time zone of the machine this service runs on (same as VictoriaLogs).
+* The range is `[start, end)`; `end` is exclusive. With only `start`, `end` is the current time; with only `end`, only the day containing `end` is restored.
+* Converted by UTC day to the partition name `YYYYMMDD`; dates later than today (UTC) are ignored.
+* If the range covers more days than `-restore.max.days`, only the most recent `-restore.max.days` days are restored and a warning is logged.
+* If the parameters can't be parsed, nothing is restored and the request is forwarded directly, letting VictoriaLogs report the error to the client.
 
-## 恢复流程
+## Restore flow
 
-对时间范围内的每一天（多天并行处理）：
+For each day in the time range (multiple days are processed in parallel):
 
-1. `<storage.dir>/partitions/<YYYYMMDD>` 已存在：不做任何事。
-2. 在 S3 中查找这一天的备份，查找规则见 [恢复时如何查找备份](s3_prefix.md#恢复时如何查找备份)。找不到时直接转发请求。
-3. 下载 tar 并流式解包到 `<storage.dir>/.restore_tmp/`，同时校验收到的数据量与 S3 对象大小一致。
-4. 解包成功后，原子地 rename 为 `<storage.dir>/partitions/<YYYYMMDD>`。中途失败不会留下半个分区。
-5. 让 VictoriaLogs 加载这个分区（见上文两种模式的说明），然后转发请求。
+1. `<storage.dir>/partitions/<YYYYMMDD>` already exists: do nothing.
+2. Look up that day's backup in S3; for the lookup rules see [How backups are located during restore](s3_prefix.md#how-backups-are-located-during-restore). If none is found, forward the request directly.
+3. Download the tar and stream-extract it into `<storage.dir>/.restore_tmp/`, verifying that the amount of data received equals the S3 object's size.
+4. After successful extraction, atomically rename it to `<storage.dir>/partitions/<YYYYMMDD>`. A mid-way failure never leaves a partial partition.
+5. Have VictoriaLogs load the partition (see the descriptions of the two modes above), then forward the request.
 
-其他细节：
+Other details:
 
-* 请求会一直等到恢复完成再转发。同一天的多个并发请求共用一次恢复；客户端断开时，恢复仍在后台继续。
-* 最多同时下载 2 个备份、同时查询 S3 8 次。下载过程中每 30 秒输出一次进度日志。
-* 结果缓存：S3 中没有备份的日期、超出保留期的日期缓存 5 分钟；恢复失败的日期 1 分钟内不重试。期间的请求直接转发。
-* 启动时清空 `<storage.dir>/.restore_tmp/`，清理上次中断的恢复留下的临时文件。
-* 恢复失败只记录错误日志，请求仍然会转发，客户端得到的是缺少这一天数据的结果。
-* **恢复的分区不会被自动删除**，请关注 `-victoria.logs.storage.dir` 所在磁盘的空间。
+* The request waits until the restore completes before being forwarded. Concurrent requests for the same day share a single restore; if the client disconnects, the restore continues in the background.
+* At most 2 backups are downloaded at once and 8 S3 queries run at once. Progress is logged every 30 seconds during download.
+* Result caching: dates with no backup in S3 and dates beyond the retention period are cached for 5 minutes; a date whose restore failed is not retried for 1 minute. Requests in the meantime are forwarded directly.
+* At startup, `<storage.dir>/.restore_tmp/` is cleared to remove temporary files left by an interrupted restore.
+* A restore failure only logs an error; the request is still forwarded, and the client gets a result missing that day's data.
+* **Restored partitions are never deleted automatically**; watch the free space on the disk holding `-victoria.logs.storage.dir`.
 
-## 退出与信号
+## Exit and signals
 
-* 收到 `SIGINT` / `SIGTERM` 时：取消正在进行的恢复，中断 `/select/logsql/tail` 实时流，最多等待 30 秒让其他请求完成，然后停止 VictoriaLogs 子进程（托管模式）并退出；再发一次信号会立即终止进程。
-* 退出码：
+* On `SIGINT` / `SIGTERM`: in-progress restores are cancelled, the `/select/logsql/tail` live streams are interrupted, up to 30 seconds are allowed for other requests to finish, then the VictoriaLogs child process is stopped (managed mode) and the process exits; sending the signal again terminates the process immediately.
+* Exit codes:
 
-| 退出码 | 含义 |
+| Exit code | Meaning |
 |---|---|
-| `0` | 收到信号后正常退出。 |
-| `1` | 参数检查不通过、S3 / VictoriaLogs 无法访问、VictoriaLogs 子进程无法启动、端口监听失败等。 |
-| `2` | 命令行参数无法解析、带有多余的位置参数、`-loglevel` 无效。 |
+| `0` | Exited normally after a signal. |
+| `1` | Flag validation failed, S3 / VictoriaLogs unreachable, the VictoriaLogs child process could not start, listening on the port failed, etc. |
+| `2` | Command-line flags could not be parsed, extra positional arguments were given, or `-loglevel` is invalid. |
 
-## 日志
+## Logs
 
-日志为 JSON 格式，输出到 stderr。托管模式下 VictoriaLogs 子进程的日志（也是 JSON 格式）同样输出到 stderr。
+Logs are in JSON format, written to stderr. In managed mode, the VictoriaLogs child process' logs (also JSON) are likewise written to stderr.

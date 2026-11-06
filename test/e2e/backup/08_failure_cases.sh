@@ -61,12 +61,12 @@ k() { echo "victoria_logs/$namespace/$env/failure/$1/$DAY_1.tar"; }
 p() { echo "-s3.prefix=victoria_logs/{namespace}/{env}/failure/$1"; }
 
 run_case missing_credentials "must be set" "$(k missing_credentials)" -- \
-  env -u auth.access_key_id -u auth.secret_access_key "$BACKUP_BIN" -s3.endpoint="$S3_ENDPOINT" -s3.region="$S3_REGION" \
+  env -u access_key_id -u secret_access_key "$BACKUP_BIN" -s3.endpoint="$S3_ENDPOINT" -s3.region="$S3_REGION" \
   -s3.bucket="$S3_BUCKET" "$(p missing_credentials)" -victoria.logs.addr="$VL_SRC_ADDR" \
   -victoria.logs.storage.dir="$VL_SRC_DATA/" -backup.date="$DAY_1"
 
 run_case wrong_secret_key "cannot access S3 bucket" "$(k wrong_secret_key)" -- \
-  env "auth.access_key_id=${S3_ACCESS_KEY}" "auth.secret_access_key=wrong-secret" "$BACKUP_BIN" \
+  env "access_key_id=${S3_ACCESS_KEY}" "secret_access_key=wrong-secret" "$BACKUP_BIN" \
   -s3.endpoint="$S3_ENDPOINT" -s3.region="$S3_REGION" -s3.bucket="$S3_BUCKET" "$(p wrong_secret_key)" \
   -victoria.logs.addr="$VL_SRC_ADDR" -victoria.logs.storage.dir="$VL_SRC_DATA/" -backup.date="$DAY_1"
 
