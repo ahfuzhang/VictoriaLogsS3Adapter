@@ -5,3 +5,4 @@
 .env
 /test/k8s/
 /test/experiments/
+cmd.sh

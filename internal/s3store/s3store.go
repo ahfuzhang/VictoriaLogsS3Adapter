@@ -17,10 +17,15 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/ahfuzhang/VictoriaLogsS3Adapter/internal/pathtmpl"
 )
@@ -69,7 +74,7 @@ func (c *Config) Validate() error {
 
 // Client is an S3 client bound to a single bucket.
 type Client struct {
-	mc     *minio.Client
+	s3     *s3.Client
 	bucket string
 }
 
@@ -119,22 +124,36 @@ func NewWithCredentials(ctx context.Context, cfg *Config, accessKeyID, secretAcc
 	if u.Host == "" {
 		return nil, fmt.Errorf("missing host in -s3.endpoint=%q", cfg.Endpoint)
 	}
-	mc, err := minio.New(u.Host, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKeyID, secretAccessKey, ""),
-		Secure: u.Scheme == "https",
-		Region: cfg.Region,
-		// BucketLookupAuto uses virtual-hosted style for AWS, GCS and Aliyun OSS
-		// endpoints and path style for everything else (e.g. MinIO).
-		BucketLookup: minio.BucketLookupAuto,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("cannot create S3 client for %q: %w", cfg.Endpoint, err)
+	region := cfg.Region
+	if region == "" {
+		region = "us-east-1"
 	}
-	c := &Client{mc: mc, bucket: cfg.Bucket}
+	s3c := s3.New(s3.Options{
+		Region:       region,
+		BaseEndpoint: aws.String(u.Scheme + "://" + u.Host),
+		Credentials:  credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, ""),
+		// Virtual-hosted style for AWS, GCS and Aliyun OSS endpoints, path style for everything else (e.g. MinIO).
+		UsePathStyle: !virtualHostedHost(u.Hostname()),
+		// Do not add CRC32 checksums / aws-chunked trailers unless required: many
+		// S3-compatible stores (Aliyun OSS, MinIO, ...) do not support them.
+		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,
+		ResponseChecksumValidation: aws.ResponseChecksumValidationWhenRequired,
+		RetryMaxAttempts:           3,
+	})
+	c := &Client{s3: s3c, bucket: cfg.Bucket}
 	if err := c.Check(ctx); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+func virtualHostedHost(host string) bool {
+	for _, suffix := range []string{".amazonaws.com", ".amazonaws.com.cn", ".aliyuncs.com", ".googleapis.com"} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Bucket returns the bucket name.
@@ -144,83 +163,114 @@ func (c *Client) Bucket() string { return c.bucket }
 func (c *Client) Check(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	ok, err := c.mc.BucketExists(ctx, c.bucket)
+	// Use ListObjectsV2 instead of HeadBucket: HeadBucket requires the bucket-level
+	// permission (e.g. oss:GetBucketInfo), which object-only credentials often lack.
+	_, err := c.s3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(c.bucket), MaxKeys: aws.Int32(1)})
 	if err != nil {
+		if isNotFound(err) {
+			return fmt.Errorf("S3 bucket %q does not exist", c.bucket)
+		}
 		return fmt.Errorf("cannot access S3 bucket %q: %w", c.bucket, err)
 	}
-	if !ok {
-		return fmt.Errorf("S3 bucket %q does not exist", c.bucket)
-	}
 	return nil
+}
+
+type countingReader struct {
+	r io.Reader
+	n atomic.Int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
 }
 
 // Upload streams r into the object key using multipart upload with an unknown size.
 // The object becomes visible only after the whole stream is uploaded successfully.
 // It returns the number of uploaded bytes.
 func (c *Client) Upload(ctx context.Context, key string, r io.Reader, contentType string) (int64, error) {
-	info, err := c.mc.PutObject(ctx, c.bucket, key, r, -1, minio.PutObjectOptions{
-		ContentType: contentType,
-		PartSize:    DefaultPartSize,
-		// Use UNSIGNED-PAYLOAD instead of aws-chunked streaming signatures for plain http
-		// endpoints. Some S3-compatible stores do not decode aws-chunked bodies and would
-		// store chunk signatures as part of the object.
-		DisableContentSha256: true,
+	up := manager.NewUploader(c.s3, func(u *manager.Uploader) {
+		u.PartSize = DefaultPartSize
+		u.Concurrency = 1 // bounds memory to ~PartSize
 	})
-	if err != nil {
+	cr := &countingReader{r: r}
+	in := &s3.PutObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+		Body:   cr,
+	}
+	if contentType != "" {
+		in.ContentType = aws.String(contentType)
+	}
+	if _, err := up.Upload(ctx, in); err != nil {
 		return 0, fmt.Errorf("cannot upload s3://%s/%s: %w", c.bucket, key, err)
 	}
-	return info.Size, nil
+	return cr.n.Load(), nil
 }
 
 // Open opens the object key for reading. The caller must close the returned reader.
 func (c *Client) Open(ctx context.Context, key string) (io.ReadCloser, int64, error) {
-	obj, err := c.mc.GetObject(ctx, c.bucket, key, minio.GetObjectOptions{})
+	out, err := c.s3.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(c.bucket), Key: aws.String(key)})
 	if err != nil {
 		return nil, 0, fmt.Errorf("cannot open s3://%s/%s: %w", c.bucket, key, err)
 	}
-	st, err := obj.Stat()
-	if err != nil {
-		_ = obj.Close()
-		return nil, 0, fmt.Errorf("cannot stat s3://%s/%s: %w", c.bucket, key, err)
-	}
-	return obj, st.Size, nil
+	return out.Body, aws.ToInt64(out.ContentLength), nil
 }
 
 // Stat returns object info. found is false when the object does not exist.
 func (c *Client) Stat(ctx context.Context, key string) (info ObjectInfo, found bool, err error) {
-	st, err := c.mc.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{})
+	st, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(c.bucket), Key: aws.String(key)})
 	if err != nil {
 		if isNotFound(err) {
 			return ObjectInfo{}, false, nil
 		}
 		return ObjectInfo{}, false, fmt.Errorf("cannot stat s3://%s/%s: %w", c.bucket, key, err)
 	}
-	return ObjectInfo{Key: st.Key, Size: st.Size, LastModified: st.LastModified}, true, nil
+	return ObjectInfo{Key: key, Size: aws.ToInt64(st.ContentLength), LastModified: aws.ToTime(st.LastModified)}, true, nil
 }
 
 // List returns all objects whose keys start with prefix (recursively).
 func (c *Client) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 	var out []ObjectInfo
-	for obj := range c.mc.ListObjects(ctx, c.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
-		if obj.Err != nil {
-			return nil, fmt.Errorf("cannot list s3://%s/%s: %w", c.bucket, prefix, obj.Err)
+	p := s3.NewListObjectsV2Paginator(c.s3, &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(prefix),
+	})
+	for p.HasMorePages() {
+		page, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("cannot list s3://%s/%s: %w", c.bucket, prefix, err)
 		}
-		out = append(out, ObjectInfo{Key: obj.Key, Size: obj.Size, LastModified: obj.LastModified})
+		for _, obj := range page.Contents {
+			out = append(out, ObjectInfo{Key: aws.ToString(obj.Key), Size: aws.ToInt64(obj.Size), LastModified: aws.ToTime(obj.LastModified)})
+		}
 	}
 	return out, nil
 }
 
 // Delete removes the object key.
 func (c *Client) Delete(ctx context.Context, key string) error {
-	if err := c.mc.RemoveObject(ctx, c.bucket, key, minio.RemoveObjectOptions{}); err != nil {
+	if _, err := c.s3.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(c.bucket), Key: aws.String(key)}); err != nil {
 		return fmt.Errorf("cannot delete s3://%s/%s: %w", c.bucket, key, err)
 	}
 	return nil
 }
 
 func isNotFound(err error) bool {
-	resp := minio.ToErrorResponse(err)
-	return resp.StatusCode == 404 || resp.Code == "NoSuchKey" || resp.Code == "NotFound"
+	var nf *types.NotFound
+	var nk *types.NoSuchKey
+	if errors.As(err, &nf) || errors.As(err, &nk) {
+		return true
+	}
+	var ae smithy.APIError
+	if errors.As(err, &ae) {
+		switch ae.ErrorCode() {
+		case "NotFound", "NoSuchKey", "NoSuchBucket":
+			return true
+		}
+	}
+	return false
 }
 
 // BackupFileName returns the backup object base name for the partition date (YYYYMMDD).
