@@ -16,7 +16,8 @@ func TestBackupKey(t *testing.T) {
 	now := time.Date(2026, 11, 5, 0, 15, 0, 0, time.UTC)
 	cases := map[string]string{
 		"victoria_logs/{env}":                     "victoria_logs/prod/20261104.tar",
-		"victoria_logs/{env}/${YYYYMMDD_HHMISS}/": "victoria_logs/prod/20261105_001500/20261104.tar",
+		"victoria_logs/{env}/${YYYYMMDD_HHMISS}/": "victoria_logs/prod/20261104_001500/20261104.tar",
+		"victoria_logs/{env}/${YYYY}/${MM}/${DD}": "victoria_logs/prod/2026/11/04/20261104.tar",
 		"": "20261104.tar",
 	}
 	for tmpl, want := range cases {
@@ -24,10 +25,32 @@ func TestBackupKey(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := BackupKey(tm, now, "20261104"); got != want {
+		got, err := BackupKey(tm, now, "20261104")
+		if err != nil {
+			t.Fatalf("BackupKey(%q): %s", tmpl, err)
+		}
+		if got != want {
 			t.Fatalf("BackupKey(%q) = %q; want %q", tmpl, got, want)
 		}
 	}
+	tm, err := pathtmpl.Parse("${YYYYMMDD}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, date := range []string{"", "2026110", "20261332", "2026-11-04"} {
+		if _, err := BackupKey(tm, now, date); err == nil {
+			t.Fatalf("BackupKey(%q): expected error", date)
+		}
+	}
+}
+
+func mustBackupKey(t *testing.T, tmpl *pathtmpl.Template, now time.Time, date string) string {
+	t.Helper()
+	key, err := BackupKey(tmpl, now, date)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }
 
 func TestCredentialsFromEnv(t *testing.T) {
@@ -72,8 +95,8 @@ func TestIntegration(t *testing.T) {
 	old := time.Date(2026, 11, 5, 0, 15, 0, 0, time.UTC)
 	newer := old.Add(time.Hour)
 	data := bytes.Repeat([]byte("0123456789"), 1<<20) // 10MiB, larger than a single small part
-	keyOld := BackupKey(tmpl, old, "20261104")
-	keyNew := BackupKey(tmpl, newer, "20261104")
+	keyOld := mustBackupKey(t, tmpl, old, "20261104")
+	keyNew := mustBackupKey(t, tmpl, newer, "20261104")
 	for _, k := range []string{keyOld, keyNew} {
 		n, err := c.Upload(ctx, k, bytes.NewReader(data), "application/x-tar")
 		if err != nil {
@@ -94,7 +117,7 @@ func TestIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyOther := BackupKey(otherTmpl, newer.Add(time.Hour), "20261104")
+	keyOther := mustBackupKey(t, otherTmpl, newer.Add(time.Hour), "20261104")
 	if _, err := c.Upload(ctx, keyOther, bytes.NewReader([]byte("other")), ""); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +148,7 @@ func TestIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyStatic := BackupKey(staticTmpl, time.Now(), "20261102")
+	keyStatic := mustBackupKey(t, staticTmpl, time.Now(), "20261102")
 	if _, err := c.Upload(ctx, keyStatic, bytes.NewReader([]byte("abc")), ""); err != nil {
 		t.Fatal(err)
 	}

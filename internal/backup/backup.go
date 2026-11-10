@@ -147,7 +147,10 @@ func (b *Backuper) Backup(ctx context.Context, date string) (*Result, error) {
 			"check that -victoria.logs.storage.dir points to the VictoriaLogs -storageDataPath", localDir, snapshot)
 	}
 
-	key := s3store.BackupKey(b.Prefix, start, date)
+	key, err := s3store.BackupKey(b.Prefix, start, date)
+	if err != nil {
+		return nil, err
+	}
 	log = log.With("key", key)
 	log.Info("uploading snapshot", "local_dir", localDir, "bucket", b.Bucket, "max_upload_bytes_per_second", b.BytesPerSecond)
 

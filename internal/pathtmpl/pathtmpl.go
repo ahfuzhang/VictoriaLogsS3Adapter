@@ -3,21 +3,21 @@
 // Supported placeholders:
 //
 //	{VAR}     - replaced with the value of the environment variable VAR
-//	${FORMAT} - replaced with the given time in UTC formatted according to FORMAT
+//	${FORMAT} - replaced with the given day and time in UTC formatted according to FORMAT
 //
 // FORMAT is any combination of the fields below, each used at most once,
 // optionally separated by '-', '_' or '.':
 //
-//	YYYY - year, 4 digits
-//	MM   - month, 01-12
-//	DD   - day of month, 01-31
-//	HH   - hour, 00-23
-//	MI   - minute, 00-59
-//	SS   - second, 00-59
+//	YYYY - year, 4 digits      (taken from day)
+//	MM   - month, 01-12        (taken from day)
+//	DD   - day of month, 01-31 (taken from day)
+//	HH   - hour, 00-23         (taken from now)
+//	MI   - minute, 00-59       (taken from now)
+//	SS   - second, 00-59       (taken from now)
 //
-// For example ${YYYYMMDD_HHMISS} expands to 20261104_011028 and
-// ${DD-MM-YYYY_HH_MI} expands to 04-11-2026_01_10. Anything else inside ${...}
-// is rejected by Parse.
+// For example, with day 2026-11-04 and now 2026-11-05 01:10:28 UTC,
+// ${YYYYMMDD_HHMISS} expands to 20261104_011028 and ${DD-MM-YYYY_HH_MI}
+// expands to 04-11-2026_01_10. Anything else inside ${...} is rejected by Parse.
 //
 // The result is normalized: leading/trailing slashes are removed and repeated
 // slashes are collapsed.
@@ -112,8 +112,10 @@ func (t *Template) HasTime() bool {
 	return false
 }
 
-// Expand expands the template using now (converted to UTC) for the time placeholders.
-func (t *Template) Expand(now time.Time) string {
+// Expand expands the template. Inside time placeholders the date fields
+// (YYYY, MM, DD) are taken from day and the time-of-day fields (HH, MI, SS)
+// from now; both are converted to UTC first.
+func (t *Template) Expand(day, now time.Time) string {
 	var sb strings.Builder
 	for _, p := range t.parts {
 		switch p.kind {
@@ -122,7 +124,7 @@ func (t *Template) Expand(now time.Time) string {
 		case kindEnv:
 			sb.WriteString(os.Getenv(p.value))
 		case kindTime:
-			sb.WriteString(p.tf.format(now.UTC()))
+			sb.WriteString(p.tf.format(day.UTC(), now.UTC()))
 		}
 	}
 	return Normalize(sb.String())
@@ -157,8 +159,8 @@ func (t *Template) StaticPrefix() string {
 // It contains no slashes, so normalization treats it like a real time value.
 const timeSentinel = "\x00time\x00"
 
-// KeyRegexp returns a regexp matching exactly the keys pathtmpl.Join(t.Expand(anyTime), name)
-// for any time value. It is used to recognize objects produced with this template
+// KeyRegexp returns a regexp matching exactly the keys pathtmpl.Join(t.Expand(anyDay, anyTime), name)
+// for any day and time values. It is used to recognize objects produced with this template
 // when listing a bucket, without matching objects of other prefixes.
 func (t *Template) KeyRegexp(name string) *regexp.Regexp {
 	var sb strings.Builder

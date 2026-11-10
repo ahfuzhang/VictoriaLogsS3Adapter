@@ -5,7 +5,7 @@ Both [victoria_logs_s3_backup](victoria_logs_s3_backup.md) and [victoria_logs_s3
 | Placeholder | Meaning |
 |---|---|
 | `{VAR}` | Replaced with the value of environment variable `VAR`. If the variable is unset or empty, the program fails at startup. |
-| `${time format}` | Replaced with the time the backup started (UTC). See below for how to write the time format. |
+| `${time format}` | Replaced with a date and time (UTC): the date fields use the date of the partition being backed up, the time-of-day fields use the time the backup started. See below for how to write the time format. |
 
 After expansion, leading and trailing `/` are removed and consecutive `/` are merged into one. The full key of a backup object is `<expanded prefix>/<YYYYMMDD>.tar`, where `YYYYMMDD` in the file name is the date (UTC day) of the partition being backed up.
 
@@ -13,14 +13,14 @@ After expansion, leading and trailing `/` are removed and consecutive `/` are me
 
 The content of `${...}` is a **free combination** of the following 6 fields:
 
-| Field | Meaning | Output |
-|---|---|---|
-| `YYYY` | Year | 4 digits, e.g. `2026` |
-| `MM` | Month | 2 digits, `01`–`12` |
-| `DD` | Day | 2 digits, `01`–`31` |
-| `HH` | Hour (24-hour clock) | 2 digits, `00`–`23` |
-| `MI` | Minute | 2 digits, `00`–`59` |
-| `SS` | Second | 2 digits, `00`–`59` |
+| Field | Meaning | Value taken from | Output |
+|---|---|---|---|
+| `YYYY` | Year | Date of the partition being backed up | 4 digits, e.g. `2026` |
+| `MM` | Month | Date of the partition being backed up | 2 digits, `01`–`12` |
+| `DD` | Day | Date of the partition being backed up | 2 digits, `01`–`31` |
+| `HH` | Hour (24-hour clock) | Time the backup started | 2 digits, `00`–`23` |
+| `MI` | Minute | Time the backup started | 2 digits, `00`–`59` |
+| `SS` | Second | Time the backup started | 2 digits, `00`–`59` |
 
 Rules:
 
@@ -29,7 +29,7 @@ Rules:
 * Fields are case-sensitive and must be uppercase.
 * **`MM` is month; write minutes as `MI`.** For example, `${YYYYMMDD_HHMISS}` means "year-month-day_hour-minute-second"; in `${YYYYMMDD_HHMMSS}`, `MM` appears twice, which is an error.
 * Each field may appear at most once within one `${...}`, and there must be at least one field.
-* Time is always expanded in **UTC**, using the time the current backup started, not the date of the partition being backed up.
+* Values are always expanded in **UTC**. `YYYY`, `MM`, `DD` are the date of the partition being backed up (the same as the `YYYYMMDD` in the file name); `HH`, `MI`, `SS` are the time the current backup started.
 * A template may contain multiple `${...}`. To organize by date directories, use multiple placeholders, e.g. `${YYYY}/${MM}/${DD}`. `/` cannot be written inside `${...}`.
 
 ## Examples
@@ -39,10 +39,11 @@ Assume `namespace=ns1`, `env=prod`, the backup started at `2026-11-05 00:15:30 U
 | `-s3.prefix` | Generated object key |
 |---|---|
 | `victoria_logs/{namespace}/{env}` | `victoria_logs/ns1/prod/20261104.tar` |
-| `victoria_logs/{env}/${YYYYMMDD_HHMISS}` | `victoria_logs/prod/20261105_001530/20261104.tar` |
-| `victoria_logs/{env}/${DD-MM-YYYY_HH_MI}` | `victoria_logs/prod/05-11-2026_00_15/20261104.tar` |
-| `victoria_logs/{env}/${YYYYMMDD}` | `victoria_logs/prod/20261105/20261104.tar` |
-| `victoria_logs/{env}/${YYYY}/${MM}/bk_${DD.HH}` | `victoria_logs/prod/2026/11/bk_05.00/20261104.tar` |
+| `victoria_logs/{env}/${YYYYMMDD_HHMISS}` | `victoria_logs/prod/20261104_001530/20261104.tar` |
+| `victoria_logs/{env}/${DD-MM-YYYY_HH_MI}` | `victoria_logs/prod/04-11-2026_00_15/20261104.tar` |
+| `victoria_logs/{env}/${YYYYMMDD}` | `victoria_logs/prod/20261104/20261104.tar` |
+| `victoria_logs_backup/{env}/${YYYY}/${MM}/${DD}` | `victoria_logs_backup/prod/2026/11/04/20261104.tar` |
+| `victoria_logs/{env}/${YYYY}/${MM}/bk_${DD.HH}` | `victoria_logs/prod/2026/11/bk_04.00/20261104.tar` |
 
 On the command line, wrap the template in single quotes so the shell doesn't expand `${...}` as a shell variable:
 

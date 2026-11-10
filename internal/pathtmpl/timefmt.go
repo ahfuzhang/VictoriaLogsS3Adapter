@@ -13,18 +13,21 @@ type timeField struct {
 	token string // the text written by the user, e.g. "YYYY"
 	name  string // human readable name used in error messages
 	width int    // number of zero-padded digits produced
-	value func(t time.Time) int
+	// isDate reports whether the field is taken from the day argument of
+	// Expand (YYYY, MM, DD) rather than from the now argument (HH, MI, SS).
+	isDate bool
+	value  func(t time.Time) int
 }
 
 // timeFields lists the supported fields. The tokens are prefix-free, so a
 // left-to-right scan splits a format into fields unambiguously.
 var timeFields = []timeField{
-	{"YYYY", "year", 4, func(t time.Time) int { return t.Year() }},
-	{"MM", "month", 2, func(t time.Time) int { return int(t.Month()) }},
-	{"DD", "day", 2, func(t time.Time) int { return t.Day() }},
-	{"HH", "hour", 2, func(t time.Time) int { return t.Hour() }},
-	{"MI", "minute", 2, func(t time.Time) int { return t.Minute() }},
-	{"SS", "second", 2, func(t time.Time) int { return t.Second() }},
+	{"YYYY", "year", 4, true, func(t time.Time) int { return t.Year() }},
+	{"MM", "month", 2, true, func(t time.Time) int { return int(t.Month()) }},
+	{"DD", "day", 2, true, func(t time.Time) int { return t.Day() }},
+	{"HH", "hour", 2, false, func(t time.Time) int { return t.Hour() }},
+	{"MI", "minute", 2, false, func(t time.Time) int { return t.Minute() }},
+	{"SS", "second", 2, false, func(t time.Time) int { return t.Second() }},
 }
 
 // TimeSeparators are the characters allowed between the fields of a time placeholder.
@@ -90,14 +93,19 @@ func parseTimeFormat(s string) (*timeFormat, error) {
 	return f, nil
 }
 
-// appendTime appends t formatted according to f to dst.
-func (f *timeFormat) appendTime(dst []byte, t time.Time) []byte {
+// appendTime appends f formatted with the date fields taken from day and the
+// time-of-day fields taken from now to dst.
+func (f *timeFormat) appendTime(dst []byte, day, now time.Time) []byte {
 	for _, e := range f.elems {
 		if e.field < 0 {
 			dst = append(dst, e.sep...)
 			continue
 		}
 		tf := timeFields[e.field]
+		t := now
+		if tf.isDate {
+			t = day
+		}
 		v := strconv.Itoa(tf.value(t))
 		for n := len(v); n < tf.width; n++ {
 			dst = append(dst, '0')
@@ -107,9 +115,10 @@ func (f *timeFormat) appendTime(dst []byte, t time.Time) []byte {
 	return dst
 }
 
-// format returns t formatted according to f.
-func (f *timeFormat) format(t time.Time) string {
-	return string(f.appendTime(nil, t))
+// format returns f formatted with the date fields taken from day and the
+// time-of-day fields taken from now.
+func (f *timeFormat) format(day, now time.Time) string {
+	return string(f.appendTime(nil, day, now))
 }
 
 // regexpSource returns a regexp source matching any value produced by format.

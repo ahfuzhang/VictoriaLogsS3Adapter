@@ -279,7 +279,20 @@ func TestBackupTimePrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Backup: %s", err)
 	}
-	if res.Key != "bk/20261105_001500/20261104.tar" {
+	// YYYYMMDD comes from the partition date, HHMISS from the backup start time.
+	if res.Key != "bk/20261104_001500/20261104.tar" {
+		t.Fatalf("key = %q", res.Key)
+	}
+}
+
+func TestBackupDateDirsPrefix(t *testing.T) {
+	t.Setenv("BACKUP_TEST_ENV", "prod")
+	e := newTestEnv(t, "victoria_logs_backup/{BACKUP_TEST_ENV}/${YYYY}/${MM}/${DD}", 10)
+	res, err := e.b.Backup(context.Background(), testDate)
+	if err != nil {
+		t.Fatalf("Backup: %s", err)
+	}
+	if res.Key != "victoria_logs_backup/prod/2026/11/04/20261104.tar" {
 		t.Fatalf("key = %q", res.Key)
 	}
 }

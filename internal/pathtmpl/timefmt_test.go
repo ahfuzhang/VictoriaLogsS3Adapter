@@ -18,7 +18,7 @@ func TestTimeFormatPadding(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parseTimeFormat(%q): %s", format, err)
 		}
-		if got := f.format(ts); got != want {
+		if got := f.format(ts, ts); got != want {
 			t.Fatalf("format(%q) = %q; want %q", format, got, want)
 		}
 	}

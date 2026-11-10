@@ -55,8 +55,8 @@ func RegisterFlags(fs *flag.FlagSet) *Config {
 	fs.StringVar(&c.Region, "s3.region", "", "S3 region, e.g. cn-hongkong")
 	fs.StringVar(&c.Bucket, "s3.bucket", "", "S3 bucket name")
 	fs.StringVar(&c.Prefix, "s3.prefix", "", "S3 key prefix template. {VAR} is replaced with the environment variable VAR; "+
-		"${FORMAT} is replaced with the backup start time (UTC), where FORMAT combines YYYY (year), MM (month), DD (day), "+
-		"HH (hour), MI (minute), SS (second), each at most once, optionally separated by '-', '_' or '.', "+
+		"${FORMAT} is replaced in UTC with YYYY (year), MM (month), DD (day) of the backed up partition date and "+
+		"HH (hour), MI (minute), SS (second) of the backup start time, each at most once, optionally separated by '-', '_' or '.', "+
 		"e.g. ${YYYYMMDD_HHMISS} or ${DD-MM-YYYY_HH_MI}")
 	return c
 }
@@ -278,10 +278,15 @@ func BackupFileName(date string) string {
 	return date + ".tar"
 }
 
-// BackupKey returns the object key for the given partition date using the
-// prefix template expanded at time now.
-func BackupKey(tmpl *pathtmpl.Template, now time.Time, date string) string {
-	return pathtmpl.Join(tmpl.Expand(now), BackupFileName(date))
+// BackupKey returns the object key for the given partition date (YYYYMMDD).
+// The date fields (YYYY, MM, DD) of the prefix template's time placeholders are
+// taken from the partition date and the time-of-day fields (HH, MI, SS) from now.
+func BackupKey(tmpl *pathtmpl.Template, now time.Time, date string) (string, error) {
+	day, err := time.Parse("20060102", date)
+	if err != nil {
+		return "", fmt.Errorf("invalid partition date %q; want YYYYMMDD: %w", date, err)
+	}
+	return pathtmpl.Join(tmpl.Expand(day, now), BackupFileName(date)), nil
 }
 
 // FindBackup looks up the backup object for the partition date (YYYYMMDD).
@@ -293,7 +298,7 @@ func BackupKey(tmpl *pathtmpl.Template, now time.Time, date string) string {
 func (c *Client) FindBackup(ctx context.Context, tmpl *pathtmpl.Template, date string) (ObjectInfo, bool, error) {
 	name := BackupFileName(date)
 	if !tmpl.HasTime() {
-		return c.Stat(ctx, pathtmpl.Join(tmpl.Expand(time.Time{}), name))
+		return c.Stat(ctx, pathtmpl.Join(tmpl.Expand(time.Time{}, time.Time{}), name))
 	}
 	objs, err := c.List(ctx, tmpl.StaticPrefix())
 	if err != nil {

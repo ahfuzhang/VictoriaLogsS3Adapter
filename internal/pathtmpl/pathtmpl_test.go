@@ -10,6 +10,8 @@ func TestExpand(t *testing.T) {
 	t.Setenv("namespace", "ns1")
 	t.Setenv("env", "prod")
 	t.Setenv("access_key_id", "dotted")
+	// The date fields come from day, the time-of-day fields from now.
+	day := time.Date(2026, 10, 3, 0, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 11, 4, 9, 10, 28, 0, time.FixedZone("UTC+8", 8*3600))
 
 	cases := []struct {
@@ -20,16 +22,16 @@ func TestExpand(t *testing.T) {
 	}{
 		{"victoria_logs/{namespace}/{env}", "victoria_logs/ns1/prod", false, "victoria_logs/ns1/prod/"},
 		{"/victoria_logs//{namespace}/{env}/", "victoria_logs/ns1/prod", false, "victoria_logs/ns1/prod/"},
-		{"victoria_logs/{env}/${YYYYMMDD_HHMISS}", "victoria_logs/prod/20261104_011028", true, "victoria_logs/prod/"},
-		{"logs/{env}/bk_${YYYYMMDD_HHMISS}/x", "logs/prod/bk_20261104_011028/x", true, "logs/prod/bk_"},
-		{"${YYYYMMDD_HHMISS}", "20261104_011028", true, ""},
-		{"a/${DD-MM-YYYY_HH_MI}", "a/04-11-2026_01_10", true, "a/"},
+		{"victoria_logs/{env}/${YYYYMMDD_HHMISS}", "victoria_logs/prod/20261003_011028", true, "victoria_logs/prod/"},
+		{"logs/{env}/bk_${YYYYMMDD_HHMISS}/x", "logs/prod/bk_20261003_011028/x", true, "logs/prod/bk_"},
+		{"${YYYYMMDD_HHMISS}", "20261003_011028", true, ""},
+		{"a/${DD-MM-YYYY_HH_MI}", "a/03-10-2026_01_10", true, "a/"},
 		{"x/${SS.MI.HH}", "x/28.10.01", true, "x/"},
-		{"${YYYYMMDD}", "20261104", true, ""},
-		{"${DD_YYYY}", "04_2026", true, ""},
-		{"{env}/${YYYY}/${MM}/${DD}/b", "prod/2026/11/04/b", true, "prod/"},
+		{"${YYYYMMDD}", "20261003", true, ""},
+		{"${DD_YYYY}", "03_2026", true, ""},
+		{"{env}/${YYYY}/${MM}/${DD}/b", "prod/2026/10/03/b", true, "prod/"},
 		{"${HH}h${MI}m", "01h10m", true, ""},
-		{"a/${YYYY--MM__DD..HH}", "a/2026--11__04..01", true, "a/"},
+		{"a/${YYYY--MM__DD..HH}", "a/2026--10__03..01", true, "a/"},
 		{"{access_key_id}", "dotted", false, "dotted/"},
 		{"", "", false, ""},
 		{"plain", "plain", false, "plain/"},
@@ -39,7 +41,7 @@ func TestExpand(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(%q): %s", c.tmpl, err)
 		}
-		if got := tm.Expand(now); got != c.want {
+		if got := tm.Expand(day, now); got != c.want {
 			t.Fatalf("Expand(%q) = %q; want %q", c.tmpl, got, c.want)
 		}
 		if tm.HasTime() != c.hasTime {
@@ -51,6 +53,19 @@ func TestExpand(t *testing.T) {
 		if tm.String() != c.tmpl {
 			t.Fatalf("String() = %q; want %q", tm.String(), c.tmpl)
 		}
+	}
+}
+
+func TestExpandDayInUTC(t *testing.T) {
+	tm, err := Parse("${YYYYMMDD}/${HHMI}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both values are converted to UTC before formatting.
+	day := time.Date(2027, 1, 1, 2, 0, 0, 0, time.FixedZone("UTC+8", 8*3600))  // 2026-12-31 18:00 UTC
+	now := time.Date(2027, 1, 1, 7, 30, 0, 0, time.FixedZone("UTC+8", 8*3600)) // 2026-12-31 23:30 UTC
+	if got, want := tm.Expand(day, now), "20261231/2330"; got != want {
+		t.Fatalf("Expand = %q; want %q", got, want)
 	}
 }
 
@@ -167,7 +182,7 @@ func TestKeyRegexp(t *testing.T) {
 		}
 		re := tm.KeyRegexp("20261104.tar")
 		// A key produced by Expand must always match.
-		generated := Join(tm.Expand(time.Date(2026, 11, 5, 0, 15, 0, 0, time.UTC)), "20261104.tar")
+		generated := Join(tm.Expand(time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 5, 0, 15, 0, 0, time.UTC)), "20261104.tar")
 		if !re.MatchString(generated) {
 			t.Fatalf("%q: regexp %s does not match generated key %q", c.tmpl, re, generated)
 		}
