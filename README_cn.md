@@ -4,7 +4,7 @@
 
 把 VictoriaLogs 的日志按天备份到 S3，并在查询时按需从 S3 恢复。
 
-> docker pull ahfuzhang/victoria-logs-s3-adapter:v0.1.0
+> docker pull ahfuzhang/victoria-logs-s3-adapter:v0.3.0
 
 ## 目标
 
@@ -88,3 +88,5 @@ curl http://127.0.0.1:8093/select/logsql/query \
 - [victoria_logs_s3_restore_svr](docs/victoria_logs_s3_restore_svr_cn.md)：恢复服务器的全部参数、托管模式与外部模式、触发恢复的请求、恢复流程、缓存与限制。
 - [-s3.prefix 前缀模板](docs/s3_prefix_cn.md)：`{环境变量}` 和 `${时间格式}` 占位符的写法、示例、错误写法，以及恢复时如何查找备份。
 - [构建与部署](docs/build_cn.md)：make 目标、交叉编译、Docker 镜像、测试。
+- [在 VLSingle 上部署定时备份](docs/vlsingle_backup_cn.md)：把备份工具作为 VictoriaMetrics Operator `VLSingle` 的 sidecar 运行，每天把日志备份到 S3。
+- [在 Kubernetes 上部署恢复服务器](docs/k8s_restore_svr_cn.md)：用 Deployment 部署恢复服务器，并通过 curl、vmui 或 Grafana 查询 S3 上的历史日志。

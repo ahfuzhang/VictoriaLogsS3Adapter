@@ -4,7 +4,7 @@
 
 Back up VictoriaLogs logs to S3 by day, and restore them from S3 on demand at query time.
 
-> docker pull ahfuzhang/victoria-logs-s3-adapter:v0.1.0
+> docker pull ahfuzhang/victoria-logs-s3-adapter:v0.3.0
 
 ## Goal
 
@@ -88,3 +88,6 @@ Run `<tool> -h` to see all command-line flags.
 - [victoria_logs_s3_restore_svr](docs/victoria_logs_s3_restore_svr.md): all flags, managed and external modes, requests that trigger a restore, restore flow, caching and limits of the restore server.
 - [-s3.prefix prefix template](docs/s3_prefix.md): how to write `{ENV_VAR}` and `${time format}` placeholders, examples, incorrect usages, and how backups are located during restore.
 - [Build and deployment](docs/build.md): make targets, cross-compilation, Docker image, tests.
+- [Scheduled backup on VLSingle](docs/vlsingle_backup.md): run the backup tool as a sidecar of a VictoriaMetrics Operator `VLSingle` to back up logs to S3 every day.
+- [Restore server on Kubernetes](docs/k8s_restore_svr.md): deploy the restore server as a Deployment and query historical logs from S3 with curl, vmui or Grafana.
+
