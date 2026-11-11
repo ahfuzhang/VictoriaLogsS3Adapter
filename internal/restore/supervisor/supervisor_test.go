@@ -48,3 +48,15 @@ func TestFreePort(t *testing.T) {
 		t.Fatalf("unexpected port %d", port)
 	}
 }
+
+func TestBeforeStartIsCalledBeforeStart(t *testing.T) {
+	calls := 0
+	s := New(Config{Bin: "/nonexistent/victoria-logs", StorageDir: t.TempDir(), BeforeStart: func() { calls++ }})
+	defer s.Stop()
+	if err := s.Start(t.Context()); err == nil {
+		t.Fatalf("expecting an error for a missing binary")
+	}
+	if calls != 1 {
+		t.Fatalf("BeforeStart must be called once per start; got %d calls", calls)
+	}
+}

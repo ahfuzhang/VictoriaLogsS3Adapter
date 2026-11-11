@@ -203,12 +203,13 @@ To access it from outside the cluster, change the Service to `type: NodePort` (`
 | `-addr` | Listen address of the restore server; must match `containerPort`. |
 | `-max.download.bytes.per.second` | Download rate limit per backup, `100mb` by default. At most 2 backups are downloaded at once, so total bandwidth is at most twice this value. |
 | `-restore.max.days` | Maximum number of days restored for a single request, `31` by default. For longer time ranges only the most recent days are restored. |
+| `-auto.remove.days` | Optional. Automatically remove partitions downloaded at least this many days ago, e.g. `-auto.remove.days=3`. `0` by default: nothing is removed. See [Automatic removal of restored partitions](victoria_logs_s3_restore_svr.md#automatic-removal-of-restored-partitions). |
 
 To serve under a path (e.g. exposed by an Ingress at `/vlogs-history/`), add `-http.prefix=/vlogs-history/`; every request path must then include this prefix.
 
 **Data volume**
 
-The restore server **never deletes** restored partitions on its own. The local data directory is just a cache of the S3 backups and can always be downloaded again on demand, so `emptyDir` is recommended:
+By default the restore server **never deletes** restored partitions on its own; with `-auto.remove.days`, partitions downloaded at least that many days ago are removed automatically. The local data directory is just a cache of the S3 backups and can always be downloaded again on demand, so `emptyDir` is recommended:
 
 * when the Pod is recreated, the cache is cleared and later queries download from S3 again;
 * `sizeLimit` caps how much node disk the cache may use. When it is exceeded, kubelet evicts the Pod; the Pod the Deployment creates in its place starts with an empty cache, and in-flight queries are interrupted. Make `sizeLimit` larger than "size of one day's partition × number of days usually queried".

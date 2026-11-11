@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -83,6 +85,10 @@ type Restorer struct {
 	// unloaded holds days whose partition directory is in place, but Loader failed for it.
 	// Loading is retried when such a day is requested again (after FailureTTL).
 	unloaded map[string]struct{}
+	// downloadedAt maps days whose partition directory is in place to the time it was downloaded.
+	// The time is persisted as the modification time of the directory, so it is
+	// read back from the partitions directory on startup.
+	downloadedAt map[string]time.Time
 
 	// retention is the retention of the VictoriaLogs instance in nanoseconds; 0 means unknown.
 	// Days VictoriaLogs would drop because of retention are not restored.
@@ -145,6 +151,7 @@ func NewRestorer(baseCtx context.Context, cfg RestorerConfig) (*Restorer, error)
 		lookups:       make(chan struct{}, cfg.MaxConcurrentLookups),
 		negative:      make(map[string]negativeEntry),
 		unloaded:      make(map[string]struct{}),
+		downloadedAt:  make(map[string]time.Time),
 	}
 	if err := os.MkdirAll(r.partitionsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("cannot create partitions directory: %w", err)
@@ -155,7 +162,127 @@ func NewRestorer(baseCtx context.Context, cfg RestorerConfig) (*Restorer, error)
 	if err := os.MkdirAll(r.tmpDir, 0o755); err != nil {
 		return nil, fmt.Errorf("cannot create temporary restore directory: %w", err)
 	}
+	if err := r.scanDownloadTimes(); err != nil {
+		return nil, fmt.Errorf("cannot scan partitions directory: %w", err)
+	}
 	return r, nil
+}
+
+// scanDownloadTimes reads the download times of the partition directories in
+// place from their modification times, which restore sets to the download time.
+// Times in the future (e.g. clock changes) are clamped to now.
+func (r *Restorer) scanDownloadTimes() error {
+	des, err := os.ReadDir(r.partitionsDir)
+	if err != nil {
+		return err
+	}
+	now := r.cfg.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, de := range des {
+		day := de.Name()
+		if !de.IsDir() || !vltime.IsPartitionName(day) {
+			continue
+		}
+		fi, err := de.Info()
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		t := fi.ModTime()
+		if t.After(now) {
+			t = now
+		}
+		r.downloadedAt[day] = t
+	}
+	if len(r.downloadedAt) > 0 {
+		slog.Info("found local partitions", "partitions", len(r.downloadedAt))
+	}
+	return nil
+}
+
+// DownloadTimes returns the download times of the partition directories in place, keyed by day (YYYYMMDD).
+func (r *Restorer) DownloadTimes() map[string]time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return maps.Clone(r.downloadedAt)
+}
+
+// DownloadedBefore returns the days (in ascending order) whose partitions were
+// downloaded at or before cutoff.
+func (r *Restorer) DownloadedBefore(cutoff time.Time) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.downloadedBeforeLocked(cutoff)
+}
+
+func (r *Restorer) downloadedBeforeLocked(cutoff time.Time) []string {
+	var days []string
+	for day, t := range r.downloadedAt {
+		if !t.After(cutoff) {
+			days = append(days, day)
+		}
+	}
+	slices.Sort(days)
+	return days
+}
+
+// RemoveDownloadedBefore removes the partitions downloaded at or before cutoff
+// and returns their days. It must be called only while VictoriaLogs is stopped.
+//
+// The partition directories are moved into the temporary directory and deleted
+// in the background, so the call is fast even for big partitions. Leftovers of
+// interrupted deletions are removed on the next startup.
+func (r *Restorer) RemoveDownloadedBefore(cutoff time.Time) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var removed, trash []string
+	for _, day := range r.downloadedBeforeLocked(cutoff) {
+		downloadedAt := r.downloadedAt[day]
+		dst := filepath.Join(r.tmpDir, "expired-"+day+"-"+randomSuffix())
+		if err := os.Rename(r.PartitionPath(day), dst); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				slog.Error("cannot remove expired partition; will retry on the next removal", "date", day, "error", err)
+				continue
+			}
+			// The directory has already been removed by somebody else.
+		} else {
+			trash = append(trash, dst)
+		}
+		delete(r.downloadedAt, day)
+		delete(r.unloaded, day)
+		delete(r.negative, day)
+		removed = append(removed, day)
+		slog.Info("removed expired partition", "date", day, "downloaded_at", downloadedAt.Format(time.RFC3339),
+			"age", r.cfg.Now().Sub(downloadedAt).Round(time.Second).String())
+	}
+	if len(trash) > 0 {
+		if err := untar.SyncDir(r.partitionsDir); err != nil {
+			slog.Warn("cannot sync partitions directory", "path", r.partitionsDir, "error", err)
+		}
+		go func() {
+			for _, p := range trash {
+				if err := os.RemoveAll(p); err != nil {
+					slog.Warn("cannot delete expired partition directory; it is deleted on the next startup", "path", p, "error", err)
+				}
+			}
+		}()
+	}
+	return removed
+}
+
+func (r *Restorer) setDownloadedAt(day string, t time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.downloadedAt[day] = t
+}
+
+func (r *Restorer) forgetDownload(day string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.downloadedAt, day)
 }
 
 // SetLoader sets the loader. It must be called before serving requests.
@@ -429,6 +556,13 @@ func (r *Restorer) restore(day, key string) error {
 	if err := os.Rename(root, dst); err != nil {
 		return fmt.Errorf("cannot move restored partition into place: %w", err)
 	}
+	// Remember the download time. It is persisted as the modification time of the
+	// partition directory (VictoriaLogs doesn't add entries to it), so it survives restarts.
+	downloadedAt := r.cfg.Now()
+	if err := os.Chtimes(dst, downloadedAt, downloadedAt); err != nil {
+		slog.Warn("cannot set the download time on the restored partition", "path", dst, "error", err)
+	}
+	r.setDownloadedAt(day, downloadedAt)
 	// Persist the new directory entry. The partition contents were synced by untar.Extract.
 	if err := untar.SyncDir(r.partitionsDir); err != nil {
 		slog.Warn("cannot sync partitions directory", "path", r.partitionsDir, "error", err)
@@ -447,10 +581,12 @@ func (r *Restorer) quarantine(day string) error {
 	dst := filepath.Join(r.tmpDir, "failed-"+day+"-"+randomSuffix())
 	if err := os.Rename(src, dst); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			r.forgetDownload(day)
 			return nil
 		}
 		return err
 	}
+	r.forgetDownload(day)
 	slog.Warn("removed restored partition which could not be loaded", "date", day)
 	return os.RemoveAll(dst)
 }

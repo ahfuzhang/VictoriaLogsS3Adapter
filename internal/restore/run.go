@@ -90,6 +90,13 @@ func Run(ctx context.Context, cfg *Config) error {
 	restorer.SetLoader(loader)
 
 	if cfg.Managed() {
+		// Expired partitions are removed before every start of VictoriaLogs, including the first one.
+		var remover *autoRemover
+		var beforeStart func()
+		if cfg.AutoRemoveDays > 0 {
+			remover = newAutoRemover(restorer, cfg.AutoRemoveDays, loader.restart)
+			beforeStart = remover.removeExpired
+		}
 		sup := supervisor.New(supervisor.Config{
 			Bin:        cfg.VLBin,
 			StorageDir: storageDir,
@@ -103,6 +110,7 @@ func Run(ctx context.Context, cfg *Config) error {
 				}
 				proxy.setBackend(be)
 			},
+			BeforeStart: beforeStart,
 		})
 		defer sup.Stop()
 		if err := sup.Start(ctx); err != nil {
@@ -110,7 +118,10 @@ func Run(ctx context.Context, cfg *Config) error {
 		}
 		loader.restarter = sup
 		slog.Info("VictoriaLogs runs as a child process", "bin", cfg.VLBin, "storage_dir", storageDir,
-			"retention", supervisor.MaxRetention)
+			"retention", supervisor.MaxRetention, "auto_remove_days", cfg.AutoRemoveDays)
+		if remover != nil {
+			go remover.run(restoreCtx)
+		}
 	} else {
 		be, err := newBackend(cfg.VLAddr, cfg.AuthKey)
 		if err != nil {

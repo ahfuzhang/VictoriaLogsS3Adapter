@@ -18,6 +18,7 @@ Exactly one must be chosen:
 * The S3 credential environment variables are not passed to the child process.
 * If the child process exits unexpectedly it is restarted automatically (backoff grows from 1 second up to 30 seconds).
 * Restored partitions are preferably hot-loaded via `/internal/partition/attach`; if hot-loading fails, the child process is restarted so it opens all partitions at startup. During the restart, new requests wait (up to 5 minutes, then 503 on timeout), and in-flight requests have 30 seconds to complete.
+* `-auto.remove.days` removes partitions downloaded at least N days ago; see [Automatic removal of restored partitions](#automatic-removal-of-restored-partitions).
 
 ### External mode
 
@@ -26,6 +27,7 @@ Exactly one must be chosen:
 * Restored partitions can only be hot-loaded via `/internal/partition/attach`; VictoriaLogs is not restarted. If loading fails, the partition directory is kept and retried the next time that day is requested.
 * At startup and every 10 minutes after, `-retentionPeriod` is read from VictoriaLogs' `/metrics`. Dates older than the retention period are not restored, because VictoriaLogs would delete them immediately. `-retention.maxDiskSpaceUsageBytes` and `-retention.maxDiskUsagePercent` may also delete restored partitions.
 * At startup, the directories under local `partitions/` are compared with the list of partitions VictoriaLogs has loaded; partitions not yet loaded are loaded when requested.
+* `-auto.remove.days` is not supported: removing partitions requires restarting VictoriaLogs, and its data directory also holds partitions which weren't downloaded from S3.
 
 ## Command-line flags
 
@@ -43,6 +45,7 @@ Exactly one must be chosen:
 | `-addr` | `0.0.0.0:8093` | HTTP listen address. |
 | `-http.prefix` | | Path prefix the service is mounted under, e.g. `/admin/`. Paths outside the prefix return 404; the prefix is stripped before forwarding to VictoriaLogs. `/admin`, `/admin/` and `admin/` are equivalent. |
 | `-restore.max.days` | `31` | Maximum number of days restored per request. For a longer time range, only the most recent this-many days are restored. Minimum 1. |
+| `-auto.remove.days` | `0` | Automatically remove partitions downloaded at least this many days ago; these days are downloaded again when queried. Managed mode only. `0` disables automatic removal. See [Automatic removal of restored partitions](#automatic-removal-of-restored-partitions). |
 | `-loglevel` | `info` | Log level: `debug`, `info`, `warn`, `error`. |
 
 Run `victoria_logs_s3_restore_svr -h` to see the same flag descriptions.
@@ -129,7 +132,20 @@ Other details:
 * Result caching: dates with no backup in S3 and dates beyond the retention period are cached for 5 minutes; a date whose restore failed is not retried for 1 minute. Requests in the meantime are forwarded directly.
 * At startup, `<storage.dir>/.restore_tmp/` is cleared to remove temporary files left by an interrupted restore.
 * A restore failure only logs an error; the request is still forwarded, and the client gets a result missing that day's data.
-* **Restored partitions are never deleted automatically**; watch the free space on the disk holding `-victoria.logs.storage.dir`.
+* By default **restored partitions are never deleted automatically**; watch the free space on the disk holding `-victoria.logs.storage.dir`. In managed mode, `-auto.remove.days` can be set; see below.
+
+## Automatic removal of restored partitions
+
+In managed mode, with `-auto.remove.days=N` (N ≥ 1), partitions downloaded at least N days ago are removed automatically to save disk space. When these days are queried later, they are downloaded from S3 again. When the flag is not set (`0` by default), no partitions are removed.
+
+* **Download time**: after a partition is restored from S3, its day `YYYYMMDD` and the download time are recorded, and the download time is set as the modification time (mtime) of the partition directory `<storage.dir>/partitions/<YYYYMMDD>` itself. VictoriaLogs never changes the mtime of the partition directory itself (queries, ingestion and merges only change `datadb/` and `indexdb/` under it), so the download time survives restarts.
+* **Scan at startup**: at startup, `<storage.dir>/partitions/` is scanned, and the mtime of every partition directory is used as its download time (times in the future count as now). So partitions restored before the flag was enabled, or placed there manually, are removed according to their mtime too.
+* **When partitions are removed**: only while the VictoriaLogs child process is stopped:
+  * before every start of the child process (startup of this service, restarts caused by failed hot-loading, automatic restarts after unexpected exits), partitions downloaded at least N days ago are removed;
+  * every day after 00:00 UTC, if there are partitions downloaded at least N days ago, the child process is restarted and they are removed while it is stopped. The restart is the same as a restart caused by failed hot-loading: new requests wait, in-flight requests have 30 seconds to complete, and live streams are interrupted. If there is nothing to remove, the child process is not restarted.
+* Partition directories are first moved into `<storage.dir>/.restore_tmp/` and deleted in the background, so removing big partitions doesn't slow down the restart. If the process exits in the middle of a deletion, the leftovers are removed at the next startup.
+* Since the check runs only once a day after 00:00 UTC, a partition is actually kept for between N and N+1 days.
+* Removal is based on the **download time**, not on the time of the last query: frequently queried days are removed after N days too and downloaded again on the next query.
 
 ## Exit and signals
 

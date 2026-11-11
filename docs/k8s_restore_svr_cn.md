@@ -203,12 +203,13 @@ spec:
 | `-addr` | 恢复服务器的监听地址，要与 `containerPort` 一致。 |
 | `-max.download.bytes.per.second` | 每个备份的下载限速，默认 `100mb`。最多同时下载 2 个备份，所以总带宽最多为该值的 2 倍。 |
 | `-restore.max.days` | 单个请求最多恢复多少天，默认 `31`。时间范围更长时只恢复最近的这么多天。 |
+| `-auto.remove.days` | 可选。自动删除下载已满这么多天的分区，例如 `-auto.remove.days=3`。默认 `0`，不删除。详见 [自动删除恢复的分区](victoria_logs_s3_restore_svr_cn.md#自动删除恢复的分区)。 |
 
 如果要把服务挂在某个路径下（例如通过 Ingress 暴露在 `/vlogs-history/`），加上 `-http.prefix=/vlogs-history/`，之后所有的访问路径都要带上这个前缀。
 
 **数据卷**
 
-恢复服务器**不会自动删除**已经恢复的分区。本地数据目录只是 S3 备份的缓存，丢了可以按需重新下载，所以推荐用 `emptyDir`：
+默认情况下，恢复服务器**不会自动删除**已经恢复的分区；设置 `-auto.remove.days` 后，下载已满这么多天的分区会被自动删除。本地数据目录只是 S3 备份的缓存，丢了可以按需重新下载，所以推荐用 `emptyDir`：
 
 * Pod 重建后缓存清空，之后的查询会重新从 S3 下载；
 * `sizeLimit` 限制缓存最多占用多少节点磁盘。超出后 kubelet 会驱逐 Pod，Deployment 重建出的新 Pod 缓存是空的，正在进行的查询会中断。`sizeLimit` 应大于“单日分区大小 × 常查询的天数”。

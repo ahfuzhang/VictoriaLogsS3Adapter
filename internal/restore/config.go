@@ -34,6 +34,8 @@ type Config struct {
 	HTTPPrefix string
 	// MaxDays is the maximum number of days a single request may restore.
 	MaxDays int
+	// AutoRemoveDays is the number of days after which downloaded partitions are removed; 0 disables removal.
+	AutoRemoveDays int
 
 	LogLevel string
 }
@@ -62,6 +64,10 @@ func RegisterFlags(fs *flag.FlagSet) *Config {
 		"Requests outside the prefix get 404; the prefix is stripped before proxying to VictoriaLogs")
 	fs.IntVar(&c.MaxDays, "restore.max.days", 31, "Maximum number of days a single request may restore. "+
 		"For longer time ranges only the most recent days are restored")
+	fs.IntVar(&c.AutoRemoveDays, "auto.remove.days", 0, "Remove partitions downloaded at least this many days ago, so they don't "+
+		"use disk space forever; they are downloaded again when requested. Every day after 00:00 UTC VictoriaLogs is restarted "+
+		"if there are such partitions, and they are removed while it is stopped. The download time of the partitions found "+
+		"on startup is the modification time of their directories. Requires -victoria.logs.bin. 0 disables automatic removal")
 	fs.StringVar(&c.LogLevel, "loglevel", "info", "Log level: debug, info, warn, error")
 	return c
 }
@@ -89,6 +95,14 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxDays < 1 {
 		return fmt.Errorf("-restore.max.days must be at least 1; got %d", c.MaxDays)
+	}
+	if c.AutoRemoveDays < 0 {
+		return fmt.Errorf("-auto.remove.days cannot be negative; got %d", c.AutoRemoveDays)
+	}
+	if c.AutoRemoveDays > 0 && !c.Managed() {
+		// Removing partitions requires restarting VictoriaLogs. Besides, the storage
+		// directory of an external VictoriaLogs holds partitions which weren't downloaded.
+		return errors.New("-auto.remove.days requires -victoria.logs.bin, since VictoriaLogs must be restarted in order to remove partitions")
 	}
 	if c.Addr == "" {
 		return errors.New("-addr must be set")

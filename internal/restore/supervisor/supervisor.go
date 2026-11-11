@@ -48,6 +48,11 @@ type Config struct {
 	// child process becomes healthy. It is called while the supervisor lock is held,
 	// so it must not call Supervisor methods.
 	OnReady func(baseURL string)
+	// BeforeStart is called before each start of a child process (the initial start,
+	// Restart and automatic restarts), while no child process is running, so it may
+	// change the storage directory. It is called while the supervisor lock is held,
+	// so it must not call Supervisor methods.
+	BeforeStart func()
 }
 
 // Supervisor manages a single VictoriaLogs child process.
@@ -91,6 +96,9 @@ func New(cfg Config) *Supervisor {
 	}
 	if cfg.OnReady == nil {
 		cfg.OnReady = func(string) {}
+	}
+	if cfg.BeforeStart == nil {
+		cfg.BeforeStart = func() {}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Supervisor{cfg: cfg, ctx: ctx, cancel: cancel}
@@ -169,6 +177,7 @@ func (s *Supervisor) Args(listenAddr string) []string {
 const startAttempts = 3
 
 func (s *Supervisor) startLocked(ctx context.Context) error {
+	s.cfg.BeforeStart()
 	var lastErr error
 	for attempt := 1; attempt <= startAttempts; attempt++ {
 		c, err := s.spawn()
