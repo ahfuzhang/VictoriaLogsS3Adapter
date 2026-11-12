@@ -89,6 +89,10 @@ func Run(ctx context.Context, cfg *Config) error {
 			_, err := b.Backup(ctx, date)
 			return err
 		},
+		exists: func(ctx context.Context, date string) (bool, error) {
+			_, found, err := s3c.FindBackup(ctx, tmpl, date)
+			return found, err
+		},
 		hour:        hour,
 		minute:      minute,
 		retryDelays: DefaultRetryDelays,

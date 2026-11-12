@@ -110,6 +110,8 @@ When `-backup.date` specifies today's or a future date, the tool prints a warnin
 * A failed backup is retried, up to 3 attempts in total, with intervals of 1 minute and 2 minutes. If the partition directory doesn't exist, no retry is made.
 * If all 3 attempts fail, an error is logged; the process does not exit and continues with the next day's schedule.
 * While waiting, the system time is checked every minute, so a backup isn't missed after system sleep or a clock adjustment.
+* **Catch-up at startup**: at startup the most recent scheduled time that has already passed is determined (e.g. with `-backup.yesterday.at=0015` and a start at `11-12 06:31`, that is `11-12 00:15`, i.e. partition `20261111`), and its backup is looked up in S3 using the same rules as restore. If it doesn't exist, the backup is run immediately (with the same retries as above). So a process started after the scheduled time, or restarted during a backup, doesn't lose that day. If the S3 lookup fails, the backup is run anyway (a duplicate is better than a gap). Only the most recent day is caught up; back up older missing days by hand with `-backup.date`.
+* If a backup (including retries) ends after the next scheduled time has passed, the next backup starts immediately instead of being skipped; after a system sleep of several days, only the most recently missed run is caught up.
 
 ## Exit and signals
 

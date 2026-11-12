@@ -25,6 +25,11 @@ func nextRun(now time.Time, hour, minute int) time.Time {
 	return t
 }
 
+// lastRun returns the latest moment at or before now at hour:minute UTC.
+func lastRun(now time.Time, hour, minute int) time.Time {
+	return nextRun(now, hour, minute).AddDate(0, 0, -1)
+}
+
 // previousDay returns the partition name (YYYYMMDD) of the UTC day before t.
 func previousDay(t time.Time) string {
 	return t.UTC().AddDate(0, 0, -1).Format(DateLayout)
@@ -61,9 +66,14 @@ func waitUntil(ctx context.Context, t time.Time, now func() time.Time, step time
 // BackupFunc backs up a single partition date.
 type BackupFunc func(ctx context.Context, date string) error
 
+// ExistsFunc reports whether a backup of the partition date already exists.
+type ExistsFunc func(ctx context.Context, date string) (bool, error)
+
 // scheduler runs a BackupFunc every day at a fixed UTC time.
 type scheduler struct {
-	backup      BackupFunc
+	backup BackupFunc
+	// exists is used at startup to detect a missed run; nil disables the check.
+	exists      ExistsFunc
 	hour        int
 	minute      int
 	retryDelays []time.Duration
@@ -74,22 +84,57 @@ type scheduler struct {
 
 // run backs up the previous UTC day every day at hour:minute UTC until ctx is canceled.
 // It returns nil on cancellation.
+//
+// At startup the most recent scheduled run that has already passed is caught
+// up if its backup is missing in S3, so a process (re)started after the
+// scheduled time, or killed during a backup, does not lose that day.
+//
+// If a run ends after the following scheduled time has passed (a long backup,
+// system suspend, clock jump), that run starts immediately instead of being
+// skipped. At most one passed run is caught up this way.
 func (s *scheduler) run(ctx context.Context) error {
-	for {
-		next := nextRun(s.now(), s.hour, s.minute)
+	last := lastRun(s.now(), s.hour, s.minute)
+	s.catchUp(ctx, last)
+	for ctx.Err() == nil {
+		next := last.AddDate(0, 0, 1)
+		if latest := lastRun(s.now(), s.hour, s.minute); latest.After(next) {
+			next = latest
+		}
 		date := previousDay(next)
 		s.log.Info("next backup scheduled", "at", next.Format(time.RFC3339), "date", date,
-			"wait_seconds", int64(next.Sub(s.now()).Seconds()))
+			"wait_seconds", max(0, int64(next.Sub(s.now()).Seconds())))
 		if err := waitUntil(ctx, next, s.now, s.sleepStep); err != nil {
-			s.log.Info("scheduler stopped")
-			return nil
+			break
 		}
 		s.runWithRetries(ctx, date)
-		if ctx.Err() != nil {
-			s.log.Info("scheduler stopped")
-			return nil
-		}
+		last = next
 	}
+	s.log.Info("scheduler stopped")
+	return nil
+}
+
+// catchUp backs up the partition of the scheduled run at slot unless its
+// backup already exists. If the check fails, the backup runs anyway: a
+// duplicate backup is better than a missing one.
+func (s *scheduler) catchUp(ctx context.Context, slot time.Time) {
+	if s.exists == nil {
+		return
+	}
+	date := previousDay(slot)
+	log := s.log.With("date", date, "scheduled_at", slot.Format(time.RFC3339))
+	found, err := s.exists(ctx, date)
+	switch {
+	case ctx.Err() != nil:
+		return
+	case err != nil:
+		log.Warn("cannot check whether the last scheduled backup exists; running it now", "error", err)
+	case found:
+		log.Info("the last scheduled backup exists; nothing to catch up")
+		return
+	default:
+		log.Info("the last scheduled backup is missing; running it now")
+	}
+	s.runWithRetries(ctx, date)
 }
 
 // runWithRetries runs the backup for date, retrying failures after retryDelays.

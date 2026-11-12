@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 )
@@ -51,6 +52,204 @@ func TestNextRun(t *testing.T) {
 			t.Errorf("previousDay(%s) = %s; want %s", got, d, tt.wantDate)
 		}
 	}
+}
+
+func TestLastRun(t *testing.T) {
+	tests := []struct {
+		now          time.Time
+		hour, minute int
+		want         time.Time
+	}{
+		{time.Date(2026, 11, 12, 6, 31, 48, 0, time.UTC), 0, 15, time.Date(2026, 11, 12, 0, 15, 0, 0, time.UTC)},
+		{time.Date(2026, 11, 12, 0, 15, 0, 0, time.UTC), 0, 15, time.Date(2026, 11, 12, 0, 15, 0, 0, time.UTC)}, // exactly at the run time
+		{time.Date(2026, 11, 12, 0, 14, 59, 0, time.UTC), 0, 15, time.Date(2026, 11, 11, 0, 15, 0, 0, time.UTC)},
+		{time.Date(2027, 1, 1, 0, 1, 0, 0, time.UTC), 0, 5, time.Date(2026, 12, 31, 0, 5, 0, 0, time.UTC)}, // year boundary
+	}
+	for _, tt := range tests {
+		if got := lastRun(tt.now, tt.hour, tt.minute); !got.Equal(tt.want) {
+			t.Errorf("lastRun(%s, %02d%02d) = %s; want %s", tt.now, tt.hour, tt.minute, got, tt.want)
+		}
+	}
+}
+
+// fakeClock is a manually advanced wall clock safe for concurrent use.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = t
+}
+
+// runScheduler runs s until it stops and fails the test if that takes too long.
+func runScheduler(t *testing.T, ctx context.Context, s *scheduler) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- s.run(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned an error: %s", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("scheduler did not stop")
+	}
+}
+
+func TestSchedulerCatchUp(t *testing.T) {
+	// The process starts at 06:31 UTC, after the 00:15 UTC run for 20261111 has passed.
+	start := time.Date(2026, 11, 12, 6, 31, 48, 0, time.UTC)
+	nextSlot := time.Date(2026, 11, 13, 0, 15, 0, 0, time.UTC)
+
+	newScheduler := func(clock *fakeClock, dates *[]string, cancelAfter int, cancel context.CancelFunc) *scheduler {
+		return &scheduler{
+			hour: 0, minute: 15,
+			retryDelays: []time.Duration{time.Millisecond},
+			log:         discardLogger,
+			now:         clock.Now,
+			sleepStep:   time.Millisecond,
+			backup: func(ctx context.Context, date string) error {
+				*dates = append(*dates, date)
+				if len(*dates) >= cancelAfter {
+					cancel()
+				}
+				return nil
+			},
+		}
+	}
+
+	t.Run("missing backup is run at startup", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clock := &fakeClock{t: start}
+		var dates, checked []string
+		s := newScheduler(clock, &dates, 1, cancel)
+		s.exists = func(ctx context.Context, date string) (bool, error) {
+			checked = append(checked, date)
+			return false, nil
+		}
+		runScheduler(t, ctx, s)
+		if fmt.Sprint(checked) != "[20261111]" || fmt.Sprint(dates) != "[20261111]" {
+			t.Fatalf("checked %q, backed up %q; want [20261111] for both", checked, dates)
+		}
+	})
+
+	t.Run("existing backup is not run again", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clock := &fakeClock{t: start}
+		var dates []string
+		s := newScheduler(clock, &dates, 1, cancel)
+		s.exists = func(ctx context.Context, date string) (bool, error) {
+			clock.Set(nextSlot) // let the next regular run start right away
+			return true, nil
+		}
+		runScheduler(t, ctx, s)
+		if fmt.Sprint(dates) != "[20261112]" {
+			t.Fatalf("backed up %q; want only the next regular run [20261112]", dates)
+		}
+	})
+
+	t.Run("failed check still runs the backup", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clock := &fakeClock{t: start}
+		var dates []string
+		s := newScheduler(clock, &dates, 1, cancel)
+		s.exists = func(ctx context.Context, date string) (bool, error) {
+			return false, errors.New("s3 unavailable")
+		}
+		runScheduler(t, ctx, s)
+		if fmt.Sprint(dates) != "[20261111]" {
+			t.Fatalf("backed up %q; want [20261111]", dates)
+		}
+	})
+
+	t.Run("cancellation during the check skips the backup", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clock := &fakeClock{t: start}
+		var dates []string
+		s := newScheduler(clock, &dates, 1, cancel)
+		s.exists = func(ctx context.Context, date string) (bool, error) {
+			cancel()
+			return false, ctx.Err()
+		}
+		runScheduler(t, ctx, s)
+		if len(dates) != 0 {
+			t.Fatalf("backed up %q; want nothing", dates)
+		}
+	})
+}
+
+func TestSchedulerRunOverrun(t *testing.T) {
+	t.Run("run that passed during a long backup starts immediately", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clock := &fakeClock{t: time.Date(2026, 11, 12, 23, 0, 0, 0, time.UTC)}
+		var dates []string
+		s := &scheduler{
+			hour: 0, minute: 15,
+			log:       discardLogger,
+			now:       clock.Now,
+			sleepStep: time.Millisecond,
+			exists:    func(ctx context.Context, date string) (bool, error) { return false, nil },
+			backup: func(ctx context.Context, date string) error {
+				dates = append(dates, date)
+				if len(dates) == 1 {
+					// The catch-up backup of 20261111 ends after the 00:15 run for 20261112.
+					clock.Set(time.Date(2026, 11, 13, 1, 0, 0, 0, time.UTC))
+				} else {
+					cancel()
+				}
+				return nil
+			},
+		}
+		runScheduler(t, ctx, s)
+		if fmt.Sprint(dates) != "[20261111 20261112]" {
+			t.Fatalf("backed up %q; want [20261111 20261112]", dates)
+		}
+	})
+
+	t.Run("only the latest passed run is caught up", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clock := &fakeClock{t: time.Date(2026, 11, 12, 6, 0, 0, 0, time.UTC)}
+		var dates []string
+		s := &scheduler{
+			hour: 0, minute: 15,
+			log:       discardLogger,
+			now:       clock.Now,
+			sleepStep: time.Millisecond,
+			exists: func(ctx context.Context, date string) (bool, error) {
+				clock.Set(time.Date(2026, 11, 13, 0, 15, 0, 0, time.UTC)) // the regular run for 20261112 is due
+				return true, nil
+			},
+			backup: func(ctx context.Context, date string) error {
+				dates = append(dates, date)
+				if len(dates) == 1 {
+					// Simulate a system suspend of several days.
+					clock.Set(time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC))
+				} else {
+					cancel()
+				}
+				return nil
+			},
+		}
+		runScheduler(t, ctx, s)
+		if fmt.Sprint(dates) != "[20261112 20261114]" {
+			t.Fatalf("backed up %q; want [20261112 20261114]", dates)
+		}
+	})
 }
 
 func TestWaitUntil(t *testing.T) {
