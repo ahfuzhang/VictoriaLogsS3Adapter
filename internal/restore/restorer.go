@@ -38,6 +38,10 @@ type Loader interface {
 	Load(ctx context.Context, day string) error
 }
 
+// ErrInsufficientDiskSpace is returned when the disk holding the storage dir
+// doesn't have enough free space for the backup to download.
+var ErrInsufficientDiskSpace = errors.New("insufficient disk space")
+
 // Directory names under the storage dir.
 const (
 	partitionsDirname = "partitions"
@@ -65,6 +69,9 @@ type RestorerConfig struct {
 	RemoveOnLoadFailure bool
 	// Now returns the current time. Defaults to time.Now.
 	Now func() time.Time
+	// FreeSpace returns the free space in bytes on the disk which holds path.
+	// Defaults to the free space reported by the operating system.
+	FreeSpace func(path string) (uint64, error)
 }
 
 // Restorer downloads partition backups from the store on demand.
@@ -89,6 +96,9 @@ type Restorer struct {
 	// The time is persisted as the modification time of the directory, so it is
 	// read back from the partitions directory on startup.
 	downloadedAt map[string]time.Time
+	// active holds the downloads in progress. The bytes they haven't written yet
+	// are reserved, so concurrent downloads cannot overcommit the disk.
+	active map[*activeDownload]struct{}
 
 	// retention is the retention of the VictoriaLogs instance in nanoseconds; 0 means unknown.
 	// Days VictoriaLogs would drop because of retention are not restored.
@@ -102,6 +112,14 @@ type Restorer struct {
 type negativeEntry struct {
 	expires time.Time
 	reason  string
+	// err is returned to callers while the entry is cached; nil for most reasons.
+	err error
+}
+
+// activeDownload is a backup download in progress.
+type activeDownload struct {
+	size int64
+	cr   *countingReader
 }
 
 // Result describes what EnsureDay did.
@@ -142,6 +160,9 @@ func NewRestorer(baseCtx context.Context, cfg RestorerConfig) (*Restorer, error)
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.FreeSpace == nil {
+		cfg.FreeSpace = diskFreeBytes
+	}
 	r := &Restorer{
 		cfg:           cfg,
 		partitionsDir: filepath.Join(cfg.StorageDir, partitionsDirname),
@@ -152,6 +173,7 @@ func NewRestorer(baseCtx context.Context, cfg RestorerConfig) (*Restorer, error)
 		negative:      make(map[string]negativeEntry),
 		unloaded:      make(map[string]struct{}),
 		downloadedAt:  make(map[string]time.Time),
+		active:        make(map[*activeDownload]struct{}),
 	}
 	if err := os.MkdirAll(r.partitionsDir, 0o755); err != nil {
 		return nil, fmt.Errorf("cannot create partitions directory: %w", err)
@@ -356,20 +378,31 @@ func (r *Restorer) PartitionPath(day string) string {
 }
 
 // EnsureDays makes sure the partitions for days are available locally, restoring
-// missing ones from the store in parallel. Errors are logged; the caller should
-// forward the request anyway.
-func (r *Restorer) EnsureDays(ctx context.Context, days []string) {
+// missing ones from the store in parallel.
+//
+// Most errors are only logged and nil is returned, so the caller forwards the
+// request anyway. An error wrapping ErrInsufficientDiskSpace is returned when a
+// backup cannot be downloaded because the disk is full; the caller must fail
+// the request then, since its result would silently miss the data of that day.
+func (r *Restorer) EnsureDays(ctx context.Context, days []string) error {
+	errs := make([]error, len(days))
 	if len(days) == 1 {
-		_, _ = r.EnsureDay(ctx, days[0])
-		return
+		_, errs[0] = r.EnsureDay(ctx, days[0])
+	} else {
+		var wg sync.WaitGroup
+		for i, day := range days {
+			wg.Go(func() {
+				_, errs[i] = r.EnsureDay(ctx, day)
+			})
+		}
+		wg.Wait()
 	}
-	var wg sync.WaitGroup
-	for _, day := range days {
-		wg.Go(func() {
-			_, _ = r.EnsureDay(ctx, day)
-		})
+	for i, err := range errs {
+		if errors.Is(err, ErrInsufficientDiskSpace) {
+			return fmt.Errorf("cannot restore partition %s: %w", days[i], err)
+		}
 	}
-	wg.Wait()
+	return nil
 }
 
 // EnsureDay makes sure the partition for day is available locally.
@@ -403,40 +436,45 @@ func (r *Restorer) ensureDay(day string) (Result, error) {
 			return ResultExists, nil
 		}
 		// The partition was restored earlier, but loading it into VictoriaLogs failed. Retry.
-		if res, ok := r.checkNegative(day); ok {
-			return res, nil
+		if res, err, ok := r.checkNegative(day); ok {
+			return res, err
 		}
 		if err := r.load(day); err != nil {
 			return ResultFailed, err
 		}
 		return ResultLoaded, nil
 	}
-	if res, ok := r.checkNegative(day); ok {
-		return res, nil
+	if res, err, ok := r.checkNegative(day); ok {
+		return res, err
 	}
 	if r.outsideRetention(day) {
 		slog.Warn("the requested day is outside the VictoriaLogs retention; not restoring it, since VictoriaLogs would drop it",
 			"date", day, "retention", time.Duration(r.retention.Load()).String())
-		r.setNegative(day, r.cfg.NotFoundTTL, "outside_retention")
+		r.setNegative(day, r.cfg.NotFoundTTL, "outside_retention", nil)
 		return ResultOutsideRetention, nil
 	}
 
 	key, found, err := r.findBackup(day)
 	if err != nil {
 		slog.Error("cannot look up backup", "date", day, "error", err)
-		r.setNegative(day, r.cfg.FailureTTL, "lookup_failed")
+		r.setNegative(day, r.cfg.FailureTTL, "lookup_failed", nil)
 		return ResultFailed, err
 	}
 	if !found {
 		slog.Info("no backup found for the requested day; forwarding the request as is", "date", day,
 			"cache_ttl", r.cfg.NotFoundTTL.String())
-		r.setNegative(day, r.cfg.NotFoundTTL, "not_found")
+		r.setNegative(day, r.cfg.NotFoundTTL, "not_found", nil)
 		return ResultNotFound, nil
 	}
 
 	if err := r.restore(day, key); err != nil {
 		slog.Error("cannot restore partition", "date", day, "key", key, "error", err)
-		r.setNegative(day, r.cfg.FailureTTL, "restore_failed")
+		if errors.Is(err, ErrInsufficientDiskSpace) {
+			// Keep failing requests for this day until the check is retried.
+			r.setNegative(day, r.cfg.FailureTTL, "insufficient_disk_space", err)
+		} else {
+			r.setNegative(day, r.cfg.FailureTTL, "restore_failed", nil)
+		}
 		return ResultFailed, err
 	}
 
@@ -471,7 +509,7 @@ func (r *Restorer) load(day string) error {
 			"date", day, "retry_after", r.cfg.FailureTTL.String(), "error", err)
 		r.setUnloaded(day, true)
 	}
-	r.setNegative(day, r.cfg.FailureTTL, "load_failed")
+	r.setNegative(day, r.cfg.FailureTTL, "load_failed", nil)
 	return err
 }
 
@@ -521,6 +559,11 @@ func (r *Restorer) restore(day, key string) error {
 	slog.Info("restore started", "date", day, "key", key, "size_bytes", size, "max_bytes_per_second", r.cfg.BytesPerSecond)
 
 	cr := &countingReader{r: body}
+	release, err := r.reserveDiskSpace(size, cr)
+	if err != nil {
+		return err
+	}
+	defer release()
 	stopProgress := r.logProgress(day, key, size, cr, startTime)
 	defer stopProgress()
 
@@ -574,6 +617,45 @@ func (r *Restorer) restore(day, key string) error {
 	return nil
 }
 
+// reserveDiskSpace verifies that the disk holding the storage dir has enough free
+// space for a backup of the given size and reserves it until release is called.
+//
+// The backup is an uncompressed tar which is extracted while it is downloaded,
+// so it needs about its own size on disk. The bytes which other downloads in
+// progress haven't written yet are subtracted from the free space.
+//
+// The check is skipped if the backup size or the free space is unknown.
+func (r *Restorer) reserveDiskSpace(size int64, cr *countingReader) (release func(), err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if size > 0 {
+		free, ferr := r.cfg.FreeSpace(r.tmpDir)
+		if ferr != nil {
+			if !errors.Is(ferr, errors.ErrUnsupported) {
+				slog.Warn("cannot determine the free disk space; skipping the free space check", "path", r.tmpDir, "error", ferr)
+			}
+		} else {
+			var reserved uint64
+			for d := range r.active {
+				if rest := d.size - d.cr.n.Load(); rest > 0 {
+					reserved += uint64(rest)
+				}
+			}
+			if reserved > free || uint64(size) > free-reserved {
+				return nil, fmt.Errorf("%w: the backup needs %d bytes, but %q has %d bytes free, %d of which are reserved by other restores in progress",
+					ErrInsufficientDiskSpace, size, r.cfg.StorageDir, free, reserved)
+			}
+		}
+	}
+	d := &activeDownload{size: size, cr: cr}
+	r.active[d] = struct{}{}
+	return func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		delete(r.active, d)
+	}, nil
+}
+
 // quarantine removes the partition directory of day. It is renamed into the
 // temporary directory first, so VictoriaLogs never sees a partially removed partition.
 func (r *Restorer) quarantine(day string) error {
@@ -609,27 +691,29 @@ func (r *Restorer) logProgress(day, key string, size int64, cr *countingReader, 
 	return func() { close(done) }
 }
 
-func (r *Restorer) checkNegative(day string) (Result, bool) {
+func (r *Restorer) checkNegative(day string) (Result, error, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, ok := r.negative[day]
 	if !ok {
-		return "", false
+		return "", nil, false
 	}
 	if r.cfg.Now().After(e.expires) {
 		delete(r.negative, day)
-		return "", false
+		return "", nil, false
 	}
 	switch e.reason {
 	case "not_found":
-		return ResultCachedNotFound, true
+		return ResultCachedNotFound, nil, true
 	case "outside_retention":
-		return ResultOutsideRetention, true
+		return ResultOutsideRetention, nil, true
 	}
-	return ResultCachedFailure, true
+	return ResultCachedFailure, e.err, true
 }
 
-func (r *Restorer) setNegative(day string, ttl time.Duration, reason string) {
+// setNegative caches the failure of day for ttl. A non-nil err is returned to
+// the callers of EnsureDay while the entry is cached.
+func (r *Restorer) setNegative(day string, ttl time.Duration, reason string, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.cfg.Now()
@@ -638,7 +722,7 @@ func (r *Restorer) setNegative(day string, ttl time.Duration, reason string) {
 			delete(r.negative, d)
 		}
 	}
-	r.negative[day] = negativeEntry{expires: now.Add(ttl), reason: reason}
+	r.negative[day] = negativeEntry{expires: now.Add(ttl), reason: reason, err: err}
 }
 
 type countingReader struct {

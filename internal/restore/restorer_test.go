@@ -722,3 +722,108 @@ func TestRestorerRootLayoutPermissions(t *testing.T) {
 	}
 	assertTmpEmpty(t, storageDir)
 }
+
+func TestRestorerInsufficientDiskSpace(t *testing.T) {
+	store := newFakeStore()
+	data := makeSnapshotTar(t, "snap")
+	store.put("20261104", data)
+	clock := &fakeClock{t: time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)}
+	var free atomic.Uint64
+	free.Store(uint64(len(data)) - 1)
+	loader := &fakeLoader{}
+	r, storageDir := newTestRestorer(t, store, loader, func(cfg *RestorerConfig) {
+		cfg.Now = clock.Now
+		cfg.FreeSpace = func(string) (uint64, error) { return free.Load(), nil }
+	})
+
+	res, err := r.EnsureDay(context.Background(), "20261104")
+	if !errors.Is(err, ErrInsufficientDiskSpace) || res != ResultFailed {
+		t.Fatalf("expecting ErrInsufficientDiskSpace; got %q, %v", res, err)
+	}
+	assertNoPartition(t, storageDir, "20261104")
+	assertTmpEmpty(t, storageDir)
+	if n := store.active.Load(); n != 0 {
+		t.Fatalf("the backup must be closed; open readers: %d", n)
+	}
+
+	// The failure is cached, and the error is still reported while it is.
+	res, err = r.EnsureDay(context.Background(), "20261104")
+	if !errors.Is(err, ErrInsufficientDiskSpace) || res != ResultCachedFailure {
+		t.Fatalf("expecting cached ErrInsufficientDiskSpace; got %q, %v", res, err)
+	}
+	if n := store.openCalls.Load(); n != 1 {
+		t.Fatalf("unexpected number of Open calls: %d; want 1", n)
+	}
+	if err := r.EnsureDays(context.Background(), []string{"20261103", "20261104"}); !errors.Is(err, ErrInsufficientDiskSpace) {
+		t.Fatalf("EnsureDays must report ErrInsufficientDiskSpace; got %v", err)
+	}
+
+	// The restore succeeds once space has been freed and the cached failure has expired.
+	free.Store(uint64(len(data)))
+	clock.Add(2 * time.Minute)
+	if res, err := r.EnsureDay(context.Background(), "20261104"); err != nil || res != ResultRestored {
+		t.Fatalf("unexpected result %q, %v", res, err)
+	}
+	if err := r.EnsureDays(context.Background(), []string{"20261103", "20261104"}); err != nil {
+		t.Fatalf("unexpected error from EnsureDays: %s", err)
+	}
+	if len(r.active) != 0 {
+		t.Fatalf("reservations must be released; got %d", len(r.active))
+	}
+}
+
+func TestRestorerReservesDiskSpaceForConcurrentDownloads(t *testing.T) {
+	data := makeSnapshotTar(t, "snap")
+	r, _ := newTestRestorer(t, newFakeStore(), nil, func(cfg *RestorerConfig) {
+		// Enough space for one backup and a half.
+		cfg.FreeSpace = func(string) (uint64, error) { return uint64(len(data)) * 3 / 2, nil }
+	})
+	size := int64(len(data))
+	first := &countingReader{}
+	release, err := r.reserveDiskSpace(size, first)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if _, err := r.reserveDiskSpace(size, &countingReader{}); !errors.Is(err, ErrInsufficientDiskSpace) {
+		t.Fatalf("expecting ErrInsufficientDiskSpace for the second download; got %v", err)
+	}
+	// Bytes already written by the first download are not reserved anymore
+	// (the fake free space doesn't shrink, unlike a real disk).
+	first.n.Store(size / 2)
+	release2, err := r.reserveDiskSpace(size, &countingReader{})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	release2()
+	release()
+	if len(r.active) != 0 {
+		t.Fatalf("reservations must be released; got %d", len(r.active))
+	}
+
+	// Unknown free space or backup size skips the check.
+	r.cfg.FreeSpace = func(string) (uint64, error) { return 0, errors.New("statfs failed") }
+	release, err = r.reserveDiskSpace(size, &countingReader{})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	release()
+	r.cfg.FreeSpace = func(string) (uint64, error) { return 0, nil }
+	release, err = r.reserveDiskSpace(-1, &countingReader{})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	release()
+}
+
+func TestDiskFreeBytes(t *testing.T) {
+	n, err := diskFreeBytes(t.TempDir())
+	if errors.Is(err, errors.ErrUnsupported) {
+		t.Skip("not supported on this platform")
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if n == 0 {
+		t.Fatalf("unexpected zero free space")
+	}
+}

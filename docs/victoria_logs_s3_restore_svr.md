@@ -132,6 +132,7 @@ Other details:
 * Result caching: dates with no backup in S3 and dates beyond the retention period are cached for 5 minutes; a date whose restore failed is not retried for 1 minute. Requests in the meantime are forwarded directly.
 * At startup, `<storage.dir>/.restore_tmp/` is cleared to remove temporary files left by an interrupted restore.
 * A restore failure only logs an error; the request is still forwarded, and the client gets a result missing that day's data.
+* Free disk space is checked before a download: the size of the backup tar is compared with the free space on the disk holding `-victoria.logs.storage.dir` (minus the bytes other downloads in progress haven't written yet). If there isn't enough space, nothing is downloaded, an error is logged, the request is **not forwarded** and the client gets `507 Insufficient Storage`; requests for the same day keep getting 507 for 1 minute, then the check is retried.
 * By default **restored partitions are never deleted automatically**; watch the free space on the disk holding `-victoria.logs.storage.dir`. In managed mode, `-auto.remove.days` can be set; see below.
 
 ## Automatic removal of restored partitions

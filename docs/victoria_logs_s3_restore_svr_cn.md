@@ -132,6 +132,7 @@ env 'access_key_id=xxx' 'secret_access_key=yyy' namespace=ns1 env=prod \
 * 结果缓存：S3 中没有备份的日期、超出保留期的日期缓存 5 分钟；恢复失败的日期 1 分钟内不重试。期间的请求直接转发。
 * 启动时清空 `<storage.dir>/.restore_tmp/`，清理上次中断的恢复留下的临时文件。
 * 恢复失败只记录错误日志，请求仍然会转发，客户端得到的是缺少这一天数据的结果。
+* 下载前检查磁盘空间：拿到备份 tar 的大小后，与 `-victoria.logs.storage.dir` 所在磁盘的剩余空间（扣除其他正在进行的下载尚未写入的部分）比较。空间不足时不下载，记录错误日志，请求**不会转发**，客户端收到 `507 Insufficient Storage`；1 分钟内同一天的请求同样返回 507，之后重新检查。
 * 默认**不会自动删除**恢复的分区，请关注 `-victoria.logs.storage.dir` 所在磁盘的空间；托管模式下可以设置 `-auto.remove.days`，见下文。
 
 ## 自动删除恢复的分区

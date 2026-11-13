@@ -18,7 +18,7 @@ import (
 
 // DayEnsurer makes partitions for the given days available locally.
 type DayEnsurer interface {
-	EnsureDays(ctx context.Context, days []string)
+	EnsureDays(ctx context.Context, days []string) error
 }
 
 // tailPath is the streaming endpoint which may stay open forever. Such requests
@@ -158,33 +158,39 @@ func (p *Proxy) Handler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	if p.cfg.Restorer != nil && strings.HasPrefix(path, selectPathPrefix) {
-		p.restoreForRequest(ctx, path)
+		if err := p.restoreForRequest(ctx, path); err != nil {
+			slog.Error("rejecting the request, since a requested partition cannot be restored", "path", path, "error", err)
+			ctx.Error(err.Error(), fasthttp.StatusInsufficientStorage)
+			return
+		}
 	}
 	p.forward(ctx, path)
 }
 
 // restoreForRequest restores partitions for the days covered by the start and end args of the request.
-func (p *Proxy) restoreForRequest(ctx *fasthttp.RequestCtx, path string) {
+//
+// A non-nil error means the request must not be forwarded to VictoriaLogs.
+func (p *Proxy) restoreForRequest(ctx *fasthttp.RequestCtx, path string) error {
 	start := formValue(ctx, "start")
 	end := formValue(ctx, "end")
 	if start == "" && end == "" {
-		return
+		return nil
 	}
 	r, err := vltime.DaysForArgs(start, end, p.cfg.Now(), p.cfg.LocalOffset(), p.cfg.MaxDays)
 	if err != nil {
 		// VictoriaLogs reports the error to the client.
 		slog.Debug("cannot determine the requested time range; forwarding the request as is", "path", path, "error", err)
-		return
+		return nil
 	}
 	if len(r.Days) == 0 {
-		return
+		return nil
 	}
 	if r.Truncated {
 		slog.Warn("the requested time range exceeds -restore.max.days; restoring only the most recent days",
 			"path", path, "start", start, "end", end, "requested_days", r.RequestedDays, "max_days", p.cfg.MaxDays,
 			"first_restored_day", r.Days[0], "last_restored_day", r.Days[len(r.Days)-1])
 	}
-	p.cfg.Restorer.EnsureDays(ctx, r.Days)
+	return p.cfg.Restorer.EnsureDays(ctx, r.Days)
 }
 
 // formValue returns the named arg like net/http Request.FormValue used by VictoriaLogs:

@@ -115,12 +115,15 @@ func TestGate(t *testing.T) {
 type recordingEnsurer struct {
 	mu    sync.Mutex
 	calls [][]string
+	// err is returned from EnsureDays.
+	err error
 }
 
-func (r *recordingEnsurer) EnsureDays(_ context.Context, days []string) {
+func (r *recordingEnsurer) EnsureDays(_ context.Context, days []string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, days)
+	return r.err
 }
 
 func (r *recordingEnsurer) take() [][]string {
@@ -693,5 +696,24 @@ func TestProxyGetWithBodyDoesNotHang(t *testing.T) {
 			t.Fatalf("%s: Content-Length and body must not be forwarded; got Content-Length=%q, body=%q", method, v, last.Body())
 		}
 		waitFor(t, func() bool { return env.proxy.gate.inFlight() == 0 })
+	}
+}
+
+func TestProxyInsufficientDiskSpace(t *testing.T) {
+	env := newTestEnv(t, "")
+	env.ensurer.err = fmt.Errorf("cannot restore partition 20261104: %w", ErrInsufficientDiskSpace)
+	status, _, body := env.do(t, "GET", "/select/logsql/query?query=*&start=2026-11-04T00:00:00Z&end=2026-11-04T01:00:00Z", "", "")
+	if status != fasthttp.StatusInsufficientStorage {
+		t.Fatalf("unexpected status %d; want 507: %s", status, body)
+	}
+	if !strings.Contains(body, "insufficient disk space") {
+		t.Fatalf("unexpected response body: %s", body)
+	}
+	if env.lastReq.Load() != nil {
+		t.Fatalf("the request must not be forwarded to VictoriaLogs")
+	}
+	// Requests which don't trigger a restore are still served.
+	if status, _, body := env.do(t, "GET", "/health", "", ""); status != 200 {
+		t.Fatalf("unexpected status %d: %s", status, body)
 	}
 }
